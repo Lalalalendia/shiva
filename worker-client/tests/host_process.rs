@@ -134,10 +134,16 @@ fn nested_outer_job_allows_atomic_inner_worker_launch() {
             .env(CHILD, "1")
             .output()
             .expect("spawn isolated outer-job host");
+        let child_stdout = String::from_utf8_lossy(&output.stdout);
+        let child_stderr = String::from_utf8_lossy(&output.stderr);
         assert!(output.status.success(),
             "nested job subprocess failed: status={:?}; stdout={}; stderr={}",
-            output.status, String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr));
+            output.status, child_stdout, child_stderr);
+        assert!(child_stderr.contains("SHIVA_WIN_NESTED_JOB_LIST=pass"),
+            "nested worker did not emit required security proof: {child_stderr}");
+        // The inner subprocess output is otherwise captured and not visible
+        // to GitHub Actions. Emit the tested proof in the CI job log.
+        eprintln!("SHIVA_WIN_NESTED_JOB_LIST=pass");
         return;
     }
 
