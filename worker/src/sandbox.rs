@@ -124,7 +124,7 @@ pub fn confine() -> Result<(), &'static str> {
 }
 
 #[cfg(all(debug_assertions, windows))]
-pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
+pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str) -> bool {
     use std::fs::{File, OpenOptions};
     use std::net::{SocketAddr, TcpStream};
     use std::process::Command;
@@ -137,6 +137,10 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
     // immediately reporting WSAEACCES. Bound the probe independently.
     // The trusted host positively verifies this loopback listener first.
     let target = SocketAddr::from(([127, 0, 0, 1], port));
+    // LPAC must not gain the ambient ALL APPLICATION PACKAGES grant.
+    // CI creates a file granted to AAP + host user but not this package SID.
+    let denied_aap_only = File::open(aap_only)
+        .err().and_then(|e| e.raw_os_error()) == Some(5);
     let denied_network = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
         Ok(_) => false,
         Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
@@ -159,8 +163,8 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
     };
     // Debug-only flags contain no paths, document content or credentials.
     // The parent captures these only for an E2E containment audit.
-    let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child}");
-    denied_read && denied_write && denied_network && denied_child
+    let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child},{denied_aap_only}");
+    denied_read && denied_write && denied_network && denied_child && denied_aap_only
 }
 
 /// This executable's probe is debug-only. A success code means denial checks
