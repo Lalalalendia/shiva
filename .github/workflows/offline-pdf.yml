@@ -1,0 +1,46 @@
+name: Shiva offline PDF
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/typst.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/Cargo.toml'
+      - 'docs/security/offline-fonts.md'
+      - '.github/workflows/offline-pdf.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/typst.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/Cargo.toml'
+      - 'docs/security/offline-fonts.md'
+      - '.github/workflows/offline-pdf.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-fonts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Upstream markdown.rs test module also imports html and serde_xml_rs.
+      - name: Run font offline/error-path corpus
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib offline_font_tests
+      - name: Compile PDF and Markdown converters
+        run: cargo check -p shiva --no-default-features --features pdf,markdown,html,xml
+      # This exercises actual PDF generation, unlike the font-loading unit tests.
+      # Cargo unit tests run with lib/ as their working directory, so use an absolute path.
+      - name: Generate a minimal real PDF with provisioned local fonts
+        env:
+          SHIVA_FONT_DIR: ${{ github.workspace }}/lib/fonts
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::test_minimal_pdf_offline
+      - name: Verify existing PDF hyperlink generation
+        env:
+          SHIVA_FONT_DIR: ${{ github.workspace }}/lib/fonts
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::test_hyperlink_generation -- --nocapture
