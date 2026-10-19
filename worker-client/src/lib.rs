@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 mod windows_launch;
 #[cfg(windows)]
 pub use windows_launch::windows_denial_probe;
+#[cfg(all(windows, debug_assertions))]
+pub use windows_launch::normal_host_rejected_by_attestation;
 
 pub const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
