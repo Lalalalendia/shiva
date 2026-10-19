@@ -126,13 +126,22 @@ pub fn confine() -> Result<(), &'static str> {
 #[cfg(all(debug_assertions, windows))]
 pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
     use std::fs::{File, OpenOptions};
-    use std::net::TcpStream;
+    use std::net::{SocketAddr, TcpStream};
     use std::process::Command;
+    use std::time::Duration;
+    use std::io::Write;
     let denied_read = File::open(read).err().and_then(|e| e.raw_os_error()) == Some(5);
     let denied_write = OpenOptions::new().write(true).create_new(true).open(write)
         .err().and_then(|e| e.raw_os_error()) == Some(5);
-    let denied_network = TcpStream::connect(("127.0.0.1", port))
-        .err().and_then(|e| e.raw_os_error()) == Some(10013);
+    // WFP/AppContainer may silently drop a prohibited connection instead of
+    // immediately reporting WSAEACCES. Bound the probe independently.
+    // The trusted host positively verifies this loopback listener first.
+    let target = SocketAddr::from(([127, 0, 0, 1], port));
+    let denied_network = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
+        Ok(_) => false,
+        Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
+            || e.kind() == std::io::ErrorKind::TimedOut,
+    };
     // ActiveProcessLimit=1, plus AppContainer and child-process policy.
     let cmd = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
@@ -140,6 +149,9 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
         .join("System32").join("cmd.exe");
     let denied_child = Command::new(cmd).arg("/C").arg("exit 0").status()
         .map(|status| !status.success()).unwrap_or(true);
+    // Debug-only flags contain no paths, document content or credentials.
+    // The parent captures these only for an E2E containment audit.
+    let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child}");
     denied_read && denied_write && denied_network && denied_child
 }
 
