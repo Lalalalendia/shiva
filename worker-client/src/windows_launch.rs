@@ -33,7 +33,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    CreateJobObjectW, IsProcessInJob,
     SetInformationJobObject, TerminateJobObject, JobObjectExtendedLimitInformation,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -50,7 +50,8 @@ use windows_sys::Win32::System::Threading::{
     EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROC_THREAD_ATTRIBUTE_JOB_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
     STARTF_USESTDHANDLES,
     STARTUPINFOEXW, STARTUPINFOW,
 };
@@ -382,16 +383,18 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
         }
     }
     let mut allow = [stdin_read.raw(), stdout_write.raw(), stderr.raw()];
+    // The job handle list must remain valid for the entire CreateProcessW call.
+    let mut job_list = [job.raw()];
     // All pointed-to attribute inputs must outlive CreateProcessW. Never
     // return pointers to stack-local SECURITY_CAPABILITIES from a helper.
     let mut attr_bytes = 0usize;
-    unsafe { InitializeProcThreadAttributeList(null_mut(), 5, 0, &mut attr_bytes); }
+    unsafe { InitializeProcThreadAttributeList(null_mut(), 6, 0, &mut attr_bytes); }
     if attr_bytes == 0 || attr_bytes > 128 * 1024 {
         return Err(io::Error::other("process attribute list unavailable"));
     }
     let mut attr_storage = vec![0usize; attr_bytes.div_ceil(size_of::<usize>())];
     let list = attr_storage.as_mut_ptr() as *mut core::ffi::c_void;
-    if unsafe { InitializeProcThreadAttributeList(list, 5, 0, &mut attr_bytes) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(list, 6, 0, &mut attr_bytes) } == 0 {
         return Err(fail());
     }
     let attr_guard = Attrs(list);
@@ -435,6 +438,14 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
         (&mitigation_policy as *const u64).cast(),
         size_of_val(&mitigation_policy), null_mut(), null()) } == 0 {
         return Err(io::Error::other(format!("worker creation mitigation policy: {}", fail())));
+    }
+    // Do not create a child outside our Job, even temporarily. Unsupported
+    // JOB_LIST (or an incompatible outer/nested job) fails closed here or at
+    // CreateProcessW; never retry using suspended post-creation assignment.
+    if unsafe { UpdateProcThreadAttribute(list, 0,
+        PROC_THREAD_ATTRIBUTE_JOB_LIST as usize,
+        job_list.as_mut_ptr().cast(), size_of_val(&job_list), null_mut(), null()) } == 0 {
+        return Err(io::Error::other(format!("job-at-creation attribute: {}", fail())));
     }
     let mut cmd = command_line(executable, args)?;
     let program = wide(executable.as_os_str());
@@ -483,21 +494,25 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
     if created == 0 { return Err(io::Error::other(format!("CreateProcessW: {}", fail()))); }
     let process = Owned::new(info.hProcess)?;
     let thread = Owned::new(info.hThread)?;
-    if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
-        let reason = io::Error::other(format!("AssignProcessToJobObject: {}", fail()));
-        unsafe { windows_sys::Win32::System::Threading::TerminateProcess(process.raw(), 1); }
-        return Err(reason);
-    }
-    // No untrusted bytes have been sent. Keep the thread suspended until
-    // independently verifying the actual token, zero capability set,
-    // membership in our exact Job, and child-process creation policy.
+    // No assignment after process creation: JOB_LIST must have placed this
+    // child directly in our Job. Fail closed before first-thread execution
+    // or any untrusted input if the OS attestation does not confirm it.
     if let Err(reason) = verify_pre_resume(process.raw(), job.raw()) {
-        unsafe { TerminateJobObject(job.raw(), 1); }
+        unsafe {
+            windows_sys::Win32::System::Threading::TerminateProcess(process.raw(), 1);
+            TerminateJobObject(job.raw(), 1);
+        }
         return Err(reason);
     }
+    #[cfg(debug_assertions)]
+    eprintln!("SHIVA_WIN_JOB_AT_CREATION=verified");
     if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
-        unsafe { TerminateJobObject(job.raw(), 1); }
-        return Err(fail());
+        let reason = fail();
+        unsafe {
+            windows_sys::Win32::System::Threading::TerminateProcess(process.raw(), 1);
+            TerminateJobObject(job.raw(), 1);
+        }
+        return Err(reason);
     }
     // The only child-inherited handles are read stdin, write stdout and NUL.
     drop(stdin_read);

@@ -1,8 +1,8 @@
 # Windows Shiva worker — P0 native AppContainer / Job preview
 
-Status: **Windows confinement PR #6 merged with exact-HEAD CI
-5/5 subprocess and 7/7 unit tests. PR #7 host-side attestation is a
-separate Draft security gate until its exact-HEAD Windows CI passes.**
+Status: **Shiva PR #6–#8 merged after Windows CI. PR #9 adds
+atomic JOB_LIST and nested-host E2E; exact-HEAD Windows acceptance
+and merge are tracked separately.**
 Repository: [Lalalalendia/shiva](https://github.com/Lalalalendia/shiva).
 Existing Linux work: PR #4 and #5. This is not an Akula release or a
 permission to index untrusted PDF/DOCX.
@@ -18,16 +18,17 @@ zero capabilities (including **no network capability**), an explicit
 PROC_THREAD_ATTRIBUTE_HANDLE_LIST (only stdin, stdout and NUL stderr),
 and PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY.
 
-The process starts **CREATE_SUSPENDED** and is assigned to a fresh
-Job Object with JOB_OBJECT_LIMIT_ACTIVE_PROCESS=1, process/job memory
+The process starts **CREATE_SUSPENDED** and is placed into a fresh
+Job Object at creation through PROC_THREAD_ATTRIBUTE_JOB_LIST (#9).
+The Job applies JOB_OBJECT_LIMIT_ACTIVE_PROCESS=1, process/job memory
 512 MiB, CPU 15 seconds, KILL_ON_JOB_CLOSE and no breakaway flags.
-Only after successful AssignProcessToJobObject does the host
-ResumeThread. The worker checks TokenIsAppContainer,
+Only after a successful OS-enforced membership attestation does the
+host ResumeThread; failed JOB_LIST does not fall back to assigning later. The worker checks TokenIsAppContainer,
 TokenCapabilities group count = 0, and IsProcessInJob **before reading
 any untrusted byte**.
 
-The separate parent-side attestation (PR #7) runs **after**
-AssignProcessToJobObject but **while the child thread is still suspended**:
+The separate parent-side attestation (introduced in PR #7) runs **after**
+process creation with JOB_LIST but **while the child thread is still suspended**:
 it independently queries the actual process's token (AppContainer and
 zero capability groups), verifies membership in the exact Job Object
 created by this launch, and confirms the system-enforced child-process
@@ -35,8 +36,9 @@ mitigation is active. Any failure kills the suspended Job/process before
 the worker receives document bytes. A negative control proves an
 ordinary unconfined host process cannot pass that attestation; the
 existing positive E2E ensures the real worker can still parse Unicode
-TXT. These attestations are useful gates but do not prove binary/package
-identity, LPAC, or that additional mitigation policies are active.
+TXT. These attestations alone do not prove binary/package identity. PR #8
+subsequently added LPAC and mitigation policies, verified by the parent
+before first untrusted input.
 
 ## rar2 #260 donor gap — LPAC and OS mitigations
 
@@ -97,11 +99,11 @@ and separately accept a real installed Windows build.
   references must fail without returning indexable text.
 - Missing AppContainer/Job configuration MUST cause the test to fail:
   the Windows test is not optional/skipped.
-- CI provisionally gives read/execute access to ALL APPLICATION PACKAGES
-  for the compiled **worker executable and its parent directory
-  traversals only** on an ephemeral GitHub runner. It does *not* grant
-  the AppContainer or application packages access to the sentinel,
-  user vault or temp input directory.
+- CI grants read/execute only to the **specific AppContainer profile SID**
+  on the worker executable and narrowly required directory traversals
+  on an ephemeral GitHub runner. An independently prepared AAP-only canary
+  must be unreadable by the contained worker but readable by the host.
+  No access is granted to the user's vault or temporary input directory.
 
 ## Remaining P0 gates
 
@@ -119,3 +121,26 @@ API sources:
 - https://learn.microsoft.com/windows/win32/secauthz/implementing-an-appcontainer
 - https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute
 - https://learn.microsoft.com/windows/win32/procthread/job-objects
+
+## Atomic Job membership at CreateProcessW — PR #9
+
+The Windows launcher now supplies a sixth process-creation attribute,
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, pointing to its already-configured Job
+handle. There is no subsequent `AssignProcessToJobObject` and **no fallback**
+to the previous assignment method on unsupported Windows configurations.
+The primary thread is still created suspended; the parent independently
+checks actual token, zero capabilities, exact Job membership, child-process
+restriction and LPAC mitigation policies before `ResumeThread` and before
+transmitting untrusted bytes. On any attestation/resume failure, the parent
+terminates the suspended process and Job.
+
+The standalone Windows CI test `nested_outer_job_allows_atomic_inner_worker_launch`
+spawns an isolated test host, assigns it to its own outer Job, and requires
+successful real TXT extraction via the inner worker Job. It does not change
+the security boundaries of other Windows tests. A fresh host-side marker
+`SHIVA_WIN_NESTED_JOB_LIST=pass` appears only on success. Existing Windows
+negative canaries and LPAC attestation remain required.
+
+A failure caused by job nesting or OS incompatibility is a test failure,
+not permission to skip the attribute. Real installed Windows, immutable
+signed package and anti-reparse checks still block Akula integration.
