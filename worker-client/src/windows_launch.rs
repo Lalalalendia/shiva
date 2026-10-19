@@ -101,12 +101,43 @@ impl Drop for Attrs {
     fn drop(&mut self) { unsafe { DeleteProcThreadAttributeList(self.0); } }
 }
 
+/// A worker path is an installed-binary authority, not a source/document
+/// path. Refuse UNC/device and existing reparse redirections of both worker
+/// and every ancestor. This is an admission check ONLY: a mutable ancestor
+/// can still be swapped after inspection; a protected installer-owned root,
+/// ACL verification and signed package are separate mandatory release gates.
+fn reject_reparse_worker_path(path: &Path) -> Result<(), ClientError> {
+    use std::os::windows::fs::MetadataExt;
+    use std::path::{Component, Prefix};
+    let mut components = path.components();
+    let local_volume = matches!(
+        components.next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_))
+    );
+    if !local_volume || !matches!(components.next(), Some(Component::RootDir))
+        || components.any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err(ClientError::InvalidConfiguration);
+    }
+    // FILE_ATTRIBUTE_REPARSE_POINT (0x400): unlike canonicalize(), a
+    // symlink_metadata check does not silently follow a junction/symlink.
+    const REPARSE_POINT: u32 = 0x400;
+    for ancestor in path.ancestors() {
+        let meta = std::fs::symlink_metadata(ancestor).map_err(|_| ClientError::Io)?;
+        if meta.file_attributes() & REPARSE_POINT != 0 {
+            return Err(ClientError::InvalidConfiguration);
+        }
+    }
+    Ok(())
+}
+
 /// Keep this file open with sharing limited to read-only until after
 /// CreateProcessW. This blocks normal file writes/rename during launch.
-/// Parent-directory reparse-point changes are still a packaging trust gate.
+/// Ancestor mutation/ACL and code-signing are still packaging trust gates.
 pub(crate) fn pin_executable(settings: &WorkerSettings) -> Result<File, ClientError> {
     let path = &settings.executable;
-    if !path.is_absolute() { return Err(ClientError::InvalidConfiguration); }
+    reject_reparse_worker_path(path)?;
     let metadata = std::fs::symlink_metadata(path).map_err(|_| ClientError::Io)?;
     if !metadata.file_type().is_file() || metadata.len() == 0 || metadata.len() > MAX_BINARY_BYTES {
         return Err(ClientError::InvalidConfiguration);
