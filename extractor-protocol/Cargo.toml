@@ -1,0 +1,11 @@
+[package]
+name = "shiva-extractor-protocol"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Versioned, bounded output contract for an isolated Shiva extractor"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

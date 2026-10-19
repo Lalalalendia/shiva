@@ -1,0 +1,31 @@
+name: Extractor protocol contract
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'extractor-protocol/**'
+      - '.github/workflows/extractor-protocol.yml'
+      - 'docs/architecture/extractor-contract-v1.md'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'extractor-protocol/**'
+      - '.github/workflows/extractor-protocol.yml'
+      - 'docs/architecture/extractor-contract-v1.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile and test protocol (no parser/PDF)
+        run: cargo test -p shiva-extractor-protocol
