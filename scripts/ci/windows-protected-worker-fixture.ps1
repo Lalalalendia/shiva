@@ -12,8 +12,8 @@ $sid = $env:SHIVA_TEST_PROFILE_SID
 if ($sid -notmatch '^S-1-15-2-') { throw 'Unexpected worker AppContainer SID' }
 
 function Checked-Icacls {
-  param([string[]]$Args)
-  & icacls.exe @Args | Out-Null
+  param([string[]]$Arguments)
+  & icacls.exe @Arguments | Out-Null
   if ($LASTEXITCODE -ne 0) {
     throw "icacls operation failed, exit=$LASTEXITCODE"
   }
@@ -68,10 +68,10 @@ $packageGrant = "*$($sid):(OI)(CI)(RX)"
 try {
   New-Item -ItemType Directory -Path $targetRoot -ErrorAction Stop | Out-Null
   Copy-Item -LiteralPath $source -Destination $targetExe -ErrorAction Stop
-  Checked-Icacls @($targetRoot, '/inheritance:r')
-  Checked-Icacls @($targetRoot, '/grant:r', $systemGrant, $adminGrant, $packageGrant)
-  Checked-Icacls @($targetExe, '/inheritance:r')
-  Checked-Icacls @($targetExe, '/grant:r',
+  Checked-Icacls -Arguments @($targetRoot, '/inheritance:r')
+  Checked-Icacls -Arguments @($targetRoot, '/grant:r', $systemGrant, $adminGrant, $packageGrant)
+  Checked-Icacls -Arguments @($targetExe, '/inheritance:r')
+  Checked-Icacls -Arguments @($targetExe, '/grant:r',
     '*S-1-5-18:(F)', '*S-1-5-32-544:(F)', "*$($sid):(RX)")
   Assert-Narrow-Acl $targetRoot
   Assert-Narrow-Acl $targetExe
