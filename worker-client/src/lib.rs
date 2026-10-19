@@ -1,6 +1,6 @@
 //! Host-side, *staged-only* client for the standalone Shiva worker.
 //! This crate does not grant vault access or index into Tantivy.
-//! Linux x86_64 preview. Windows is refused until its sandbox is accepted.
+//! Linux and Windows preview. Windows uses a native AppContainer + Job launcher.
 
 use serde::Serialize;
 use shiva_extractor_protocol::{
@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+mod windows_launch;
+#[cfg(windows)]
+pub use windows_launch::windows_denial_probe;
 
 pub const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -96,7 +101,7 @@ fn valid_identifier(s: &str) -> bool {
 fn check_settings(settings: &WorkerSettings, source_id: &str, format: &str, input: &[u8])
     -> Result<(), ClientError>
 {
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    if !cfg!(any(all(target_os = "linux", target_arch = "x86_64"), windows)) {
         return Err(ClientError::UnsupportedPlatform);
     }
     if !valid_identifier(source_id) || input.len() > MAX_INPUT_BYTES {
@@ -153,6 +158,9 @@ pub fn extract(
     input: &[u8],
 ) -> Result<VerifiedDocument, ClientError> {
     check_settings(settings, source_id, format, input)?;
+    #[cfg(windows)]
+    let _pinned_image = windows_launch::pin_executable(settings)?;
+    #[cfg(not(windows))]
     if binary_blake3(&settings.executable)? != settings.expected_binary_blake3 {
         return Err(ClientError::WorkerHashMismatch);
     }
@@ -177,6 +185,7 @@ pub fn extract(
     // Avoid environment leakage, user-controlled cwd and stdin inherited FDs.
     // The trusted worker is required to install OS confinement *before*
     // accepting request bytes. It independently closes FDs >=3.
+    #[cfg(not(windows))]
     let mut child = Command::new(&settings.executable)
         .env_clear()
         .current_dir("/")
@@ -184,6 +193,9 @@ pub fn extract(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn().map_err(|_| ClientError::Io)?;
+    #[cfg(windows)]
+    let mut child = windows_launch::spawn(&settings.executable, &[])
+        .map_err(|_| ClientError::Io)?;
     let mut child_input = child.stdin.take().ok_or(ClientError::Io)?;
     let child_output = child.stdout.take().ok_or(ClientError::Io)?;
     let owned_input = input.to_vec();
