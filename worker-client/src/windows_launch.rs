@@ -361,18 +361,28 @@ pub fn windows_denial_probe(
         ClientError::Io
     })?;
     drop(child.stdin.take());
-    drop(child.stdout.take());
-    let start = Instant::now();
+    let mut diagnostic_pipe = child.stdout.take().ok_or(ClientError::Io)?;
+    let diagnostics = std::thread::spawn(move || -> io::Result<Vec<u8>> {
+        let mut sample = Vec::new();
+        diagnostic_pipe.by_ref().take(256).read_to_end(&mut sample)?;
+        Ok(sample)
+    });
+    let started = Instant::now();
     loop {
         match child.try_wait().map_err(|_| ClientError::Io)? {
-            Some(status) if status.success() => return Ok(()),
             Some(status) => {
+                if let Ok(Ok(sample)) = diagnostics.join() {
+                    // Only boolean flags from the CI-only probe, no paths.
+                    eprintln!("SHIVA_WIN_PROBE_FLAGS: {}", String::from_utf8_lossy(&sample).trim());
+                }
+                if status.success() { return Ok(()); }
                 eprintln!("SHIVA_WIN_PROBE_WORKER_EXIT: {status:?}");
                 return Err(ClientError::WorkerFailed);
-            },
-            None if start.elapsed() >= Duration::from_secs(8) => {
+            }
+            None if started.elapsed() >= Duration::from_secs(8) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = diagnostics.join();
                 return Err(ClientError::TimedOut);
             }
             None => sleep(Duration::from_millis(10)),
