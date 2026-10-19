@@ -31,5 +31,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Image I/O boundary and Markdown tests (no PDF build)
-        run: cargo test -p shiva --no-default-features --features markdown --lib
+      # Existing upstream Markdown unit tests import HTML and serde_xml_rs
+      # unconditionally under cfg(test). Compile those feature dependencies
+      # without linking the expensive PDF / Typst stack.
+      - name: Check non-PDF extractor configuration
+        run: cargo check -p shiva --no-default-features --features markdown,html,xml
+      - name: Verify image path denial and allowed writes
+        run: cargo test -p shiva --no-default-features --features markdown,html,xml --lib core::tests::image_io_stays_inside_its_selected_root
