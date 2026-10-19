@@ -161,7 +161,7 @@ pub fn extract(
 ) -> Result<VerifiedDocument, ClientError> {
     check_settings(settings, source_id, format, input)?;
     #[cfg(windows)]
-    let _pinned_image = windows_launch::pin_executable(settings)?;
+    let pinned_image = windows_launch::pin_executable(settings)?;
     #[cfg(not(windows))]
     if binary_blake3(&settings.executable)? != settings.expected_binary_blake3 {
         return Err(ClientError::WorkerHashMismatch);
@@ -196,7 +196,7 @@ pub fn extract(
         .stderr(Stdio::null())
         .spawn().map_err(|_| ClientError::Io)?;
     #[cfg(windows)]
-    let mut child = windows_launch::spawn(&settings.executable, &[])
+    let mut child = windows_launch::spawn(&settings.executable, &[], &pinned_image)
         .map_err(|e| {
             #[cfg(debug_assertions)]
             eprintln!("SHIVA_WIN_LAUNCH_DIAGNOSTIC: {e}");

@@ -10,7 +10,7 @@ use std::io::{self, Read};
 use std::mem::{size_of, size_of_val};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::FromRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::ExitStatusExt;
 use std::path::Path;
 use std::process::ExitStatus;
@@ -30,7 +30,8 @@ use windows_sys::Win32::Security::{
     TOKEN_QUERY, TokenCapabilities, TokenIsAppContainer,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob,
@@ -128,6 +129,40 @@ fn reject_reparse_worker_path(path: &Path) -> Result<(), ClientError> {
         if meta.file_attributes() & REPARSE_POINT != 0 {
             return Err(ClientError::InvalidConfiguration);
         }
+    }
+    Ok(())
+}
+
+/// Read the full 128-bit FileId + volume serial of the open file object.
+/// Unlike a path string or content hash, this distinguishes two separate
+/// files that contain identical bytes (including an attacker-made copy).
+fn file_id_by_handle(file: &File) -> io::Result<FILE_ID_INFO> {
+    let mut id = FILE_ID_INFO::default();
+    if unsafe { GetFileInformationByHandleEx(
+        file.as_raw_handle(), FileIdInfo,
+        (&mut id as *mut FILE_ID_INFO).cast(), size_of::<FILE_ID_INFO>() as u32
+    ) } == 0 {
+        return Err(io::Error::other(format!("FileIdInfo unavailable: {}", fail())));
+    }
+    Ok(id)
+}
+
+/// Verify again immediately before CreateProcessW that the installed worker
+/// pathname still resolves to the physical file whose bytes we already
+/// hashed. The pinned file handle remains open throughout the launch.
+/// This does not lock parent directory names against changes after this
+/// check: immutable installer ACLs remain a mandatory separate release gate.
+fn verify_pinned_path_identity(pinned: &File, path: &Path) -> io::Result<()> {
+    reject_reparse_worker_path(path)
+        .map_err(|_| io::Error::other("worker path rejected before FileId check"))?;
+    let reopened = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(path)
+        .map_err(|_| io::Error::other("worker path cannot be reopened for FileId check"))?;
+    let pinned_id = file_id_by_handle(pinned)?;
+    let reopened_id = file_id_by_handle(&reopened)?;
+    if pinned_id.VolumeSerialNumber != reopened_id.VolumeSerialNumber
+        || pinned_id.FileId.Identifier != reopened_id.FileId.Identifier
+    {
+        return Err(io::Error::other("worker image FileId changed after hash pinning"));
     }
     Ok(())
 }
@@ -361,7 +396,7 @@ impl WindowsChild {
     }
 }
 /// A live Job Object handle kills the process tree if the host drops the child.
-pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChild> {
+pub(crate) fn spawn(executable: &Path, args: &[String], pinned_image: &File) -> io::Result<WindowsChild> {
     if !executable.is_absolute() { return Err(io::Error::other("worker path must be absolute")); }
     let sid = profile_sid().map_err(|e| io::Error::other(format!("profile setup: {e}")))?;
     let job = create_job().map_err(|e| io::Error::other(format!("job setup: {e}")))?;
@@ -485,6 +520,10 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
     startup.StartupInfo.hStdError = stderr.raw();
     startup.lpAttributeList = attr_guard.0;
     let mut info = PROCESS_INFORMATION::default();
+    // Exact last pre-launch check: reject a new redirect or a distinct file.
+    verify_pinned_path_identity(pinned_image, executable)?;
+    #[cfg(debug_assertions)]
+    eprintln!("SHIVA_WIN_IMAGE_FILE_ID=pass");
     let created = unsafe { CreateProcessW(
         program.as_ptr(), cmd.as_mut_ptr(), null(), null(), 1,
         CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
@@ -527,7 +566,7 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
 pub fn windows_denial_probe(
     settings: &WorkerSettings, read: &Path, write: &Path, port: u16, aap_only: &Path
 ) -> Result<(), ClientError> {
-    let _lock = pin_executable(settings)?;
+    let pinned_image = pin_executable(settings)?;
     let args = vec![
         "--probe-windows-denials".to_string(),
         read.to_string_lossy().into_owned(),
@@ -535,7 +574,7 @@ pub fn windows_denial_probe(
         port.to_string(),
         aap_only.to_string_lossy().into_owned(),
     ];
-    let mut child = spawn(&settings.executable, &args).map_err(|e| {
+    let mut child = spawn(&settings.executable, &args, &pinned_image).map_err(|e| {
         eprintln!("SHIVA_WIN_PROBE_LAUNCH_DIAGNOSTIC: {e}");
         ClientError::Io
     })?;
@@ -573,4 +612,31 @@ pub fn windows_denial_probe(
     _: &WorkerSettings, _: &Path, _: &Path, _: u16, _: &Path
 ) -> Result<(), ClientError> {
     Err(ClientError::UnsupportedPlatform)
+}
+#[cfg(test)]
+mod image_identity_tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn file_id_distinguishes_separate_files_with_identical_bytes() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(
+            format!("shiva-file-id-{}-{nonce}", std::process::id())
+        );
+        std::fs::create_dir(&dir).unwrap();
+        let first = dir.join("pinned-image.bin");
+        let second = dir.join("attacker-copy.bin");
+        std::fs::write(&first, b"same executable bytes").unwrap();
+        std::fs::write(&second, b"same executable bytes").unwrap();
+        let pinned = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&first).unwrap();
+        verify_pinned_path_identity(&pinned, &first).expect("same physical file is allowed");
+        let rejected = verify_pinned_path_identity(&pinned, &second).unwrap_err();
+        assert!(rejected.to_string().contains("FileId changed"),
+            "independent same-byte file unexpectedly matched pinned image: {rejected}");
+        drop(pinned);
+        std::fs::remove_file(first).unwrap();
+        std::fs::remove_file(second).unwrap();
+        std::fs::remove_dir(dir).unwrap();
+    }
 }
