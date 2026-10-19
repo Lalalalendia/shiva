@@ -77,9 +77,70 @@ pub fn confine() -> Result<(), &'static str> {
     Ok(())
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(not(any(all(target_os = "linux", target_arch = "x86_64"), windows)))]
 pub fn confine() -> Result<(), &'static str> {
     Err("unsupported host: worker refuses execution without an OS sandbox")
+}
+
+#[cfg(windows)]
+pub fn confine() -> Result<(), &'static str> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Security::{GetTokenInformation, TokenIsAppContainer, TokenCapabilities, TOKEN_QUERY};
+    use windows_sys::Win32::System::JobObjects::IsProcessInJob;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use std::ptr::null_mut;
+    unsafe {
+        let mut token = null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err("cannot verify worker token");
+        }
+        struct TokenHandle(windows_sys::Win32::Foundation::HANDLE);
+        impl Drop for TokenHandle {
+            fn drop(&mut self) { unsafe { CloseHandle(self.0); } }
+        }
+        let token = TokenHandle(token);
+        let mut app = 0u32;
+        let mut returned = 0u32;
+        if GetTokenInformation(
+            token.0, TokenIsAppContainer, (&mut app as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32, &mut returned
+        ) == 0 || app != 1 {
+            return Err("worker token is not an AppContainer");
+        }
+        // A process with capabilities could have network or file authority.
+        let mut cap_words = [0usize; 32];
+        if GetTokenInformation(
+            token.0, TokenCapabilities, cap_words.as_mut_ptr().cast(),
+            std::mem::size_of_val(&cap_words) as u32, &mut returned
+        ) == 0 || (cap_words.as_ptr() as *const u32).read() != 0 {
+            return Err("worker AppContainer has unexpected capabilities");
+        }
+        let mut in_job = 0i32;
+        if IsProcessInJob(GetCurrentProcess(), null_mut(), &mut in_job) == 0 || in_job != 1 {
+            return Err("worker is not inside a Job Object");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(debug_assertions, windows))]
+pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
+    use std::fs::{File, OpenOptions};
+    use std::net::TcpStream;
+    use std::process::Command;
+    let denied_read = File::open(read).err().and_then(|e| e.raw_os_error()) == Some(5);
+    let denied_write = OpenOptions::new().write(true).create_new(true).open(write)
+        .err().and_then(|e| e.raw_os_error()) == Some(5);
+    let denied_network = TcpStream::connect(("127.0.0.1", port))
+        .err().and_then(|e| e.raw_os_error()) == Some(10013);
+    // ActiveProcessLimit=1, plus AppContainer and child-process policy.
+    let cmd = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
+        .join("System32").join("cmd.exe");
+    let denied_child = Command::new(cmd).arg("/C").arg("exit 0").status()
+        .map(|status| !status.success()).unwrap_or(true);
+    denied_read && denied_write && denied_network && denied_child
 }
 
 /// This executable's probe is debug-only. A success code means denial checks
