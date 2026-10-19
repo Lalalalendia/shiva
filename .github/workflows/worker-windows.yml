@@ -107,6 +107,8 @@ jobs:
         env:
           SHIVA_TEST_WORKER_BIN: ${{ github.workspace }}\\target\\debug\\shiva-worker.exe
         run: cargo test -p shiva-worker-client --test worker_image_path -- --nocapture
+      - name: Windows pinned executable FileId unit negatives
+        run: cargo test -p shiva-worker-client --lib -- --nocapture
       - name: Win32 Worker unit / protocol check
         run: cargo test -p shiva-worker --lib
       - name: Compile native runner and guard
