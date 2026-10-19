@@ -49,3 +49,31 @@ API docs:
 - https://learn.microsoft.com/en-us/windows/desktop/api/winbase/nf-winbase-getfileinformationbyhandleex
 - https://learn.microsoft.com/en-us/windows/win32/api/Wintrust/nf-wintrust-winverifytrust
 - https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order
+
+
+## IMAGE-02: bound physical file identity immediately before launch (stacked PR)
+
+The previous IMAGE-01 preflight only detects reparse points present at inspection.
+Now the client holds the BLAKE3-validated image `File` across launch and passes
+that same handle to `windows_launch::spawn`. Just before `CreateProcessW` the
+host checks all ancestors for reparse points **again**, opens the pathname
+separately, and obtains `FILE_ID_INFO` with `GetFileInformationByHandleEx`
+for both still-open handles. Both `VolumeSerialNumber` and all 128 bits of
+`FileId` must match. A failed query or mismatch blocks launch without
+falling back to an unverified process. The debug-only exact-head Windows CI
+requires `SHIVA_WIN_IMAGE_FILE_ID=pass`.
+
+A dedicated native Windows unit negative creates two distinct files with
+*identical contents*. It verifies that reopening the original path matches the
+pinned handle while reopening the duplicate does not. A file hash alone would
+accept both copies; physical FileId prevents this particular substitution.
+
+**Security limit:** the comparison is still a *pre-launch* path re-open, not
+an identity query on the actual mapped image section. An attacker who can
+rename/junction-swap mutable ancestor directories in the remaining interval
+might still alter resolution by `CreateProcessW`. Only a trusted immutable
+installation directory, audited ancestry ACL and verified, pinned signed
+package can satisfy the production gate. Do not describe IMAGE-02 as a full
+TOCTOU fix.
+
+Source: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
