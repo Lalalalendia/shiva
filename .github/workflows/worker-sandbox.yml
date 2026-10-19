@@ -1,0 +1,35 @@
+name: Shiva worker sandbox boundary
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'worker/**'
+      - 'extractor-protocol/**'
+      - '.github/workflows/worker-sandbox.yml'
+      - 'docs/architecture/shiva-worker-linux-preview.md'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'worker/**'
+      - 'extractor-protocol/**'
+      - '.github/workflows/worker-sandbox.yml'
+      - 'docs/architecture/shiva-worker-linux-preview.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit and subprocess denial tests (real Linux seccomp)
+        run: cargo test -p shiva-worker -- --nocapture
+      - name: Explicit format and sandbox feature check
+        run: cargo check -p shiva-worker
