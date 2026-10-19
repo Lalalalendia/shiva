@@ -195,7 +195,11 @@ pub fn extract(
         .spawn().map_err(|_| ClientError::Io)?;
     #[cfg(windows)]
     let mut child = windows_launch::spawn(&settings.executable, &[])
-        .map_err(|_| ClientError::Io)?;
+        .map_err(|e| {
+            #[cfg(debug_assertions)]
+            eprintln!("SHIVA_WIN_LAUNCH_DIAGNOSTIC: {e}");
+            ClientError::Io
+        })?;
     let mut child_input = child.stdin.take().ok_or(ClientError::Io)?;
     let child_output = child.stdout.take().ok_or(ClientError::Io)?;
     let owned_input = input.to_vec();
