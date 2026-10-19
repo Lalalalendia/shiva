@@ -1,0 +1,59 @@
+name: Shiva native Windows sandbox acceptance
+
+on:
+  pull_request:
+    paths:
+      - 'worker/**'
+      - 'worker-client/**'
+      - 'extractor-protocol/**'
+      - 'Cargo.toml'
+      - '.github/workflows/worker-windows.yml'
+      - 'docs/architecture/windows-shiva-worker-v1.md'
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - 'worker-client/**'
+      - 'extractor-protocol/**'
+      - '.github/workflows/worker-windows.yml'
+      - 'docs/architecture/windows-shiva-worker-v1.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-real-appcontainer:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Windows Shiva executable
+        run: cargo build -p shiva-worker --bin shiva-worker
+      - name: Provision read-execute permission only for CI worker binary
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "target\debug\shiva-worker.exe"
+          if (!(Test-Path $exe)) { throw "Worker build missing" }
+          $principal = "*S-1-15-2-1:(RX)"
+          $current = (Get-Item $exe).Directory
+          while ($null -ne $current -and $current.FullName -ne $current.Root.FullName) {
+            & icacls.exe $current.FullName /grant $principal | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Could not grant AppContainer directory traverse" }
+            $current = $current.Parent
+          }
+          & icacls.exe $exe /grant $principal | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not grant AppContainer binary execute" }
+          Write-Host "CI-only binary read/execute grant in place; no vault/temp grants"
+      - name: Native AppContainer and Job deny E2E
+        env:
+          SHIVA_TEST_WORKER_BIN: ${{ github.workspace }}\target\debug\shiva-worker.exe
+        run: cargo test -p shiva-worker-client --test host_process -- --nocapture
+      - name: Win32 Worker unit / protocol check
+        run: cargo test -p shiva-worker --lib
+      - name: Compile native runner and guard
+        run: cargo check -p shiva-worker-client -p shiva-worker
