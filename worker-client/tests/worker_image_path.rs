@@ -29,12 +29,22 @@ fn junctioned_worker_ancestor_is_rejected_before_spawn() {
     std::fs::create_dir(&fixture).unwrap();
     let junction = fixture.join("fake-install");
     let original_dir = original.parent().expect("worker directory");
-    // NTFS junctions can be created by an ordinary test host without
-    // enabling developer-mode symbolic-link privileges.
-    let command = format!("mklink /J \"{}\" \"{}\"", junction.display(), original_dir.display());
-    let created = std::process::Command::new("cmd.exe")
-        .args(["/D", "/C", &command]).output().expect("create test junction");
-    assert!(created.status.success(), "mklink /J failed: {}",
+    // PowerShell's Junction item avoids cmd.exe /C quoting ambiguities
+    // on Windows CI. Escape single quotes in the two literal path values.
+    // Ordinary users may create a junction without symlink privilege.
+    fn ps_literal(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\'', "''")
+    }
+    let command = format!(
+        "New-Item -ItemType Junction -Path '{}' -Target '{}' -ErrorAction Stop | Out-Null",
+        ps_literal(&junction), ps_literal(original_dir)
+    );
+    let created = std::process::Command::new("pwsh.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &command])
+        .output().expect("invoke PowerShell for test junction");
+    assert!(created.status.success(),
+        "PowerShell Junction fixture failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&created.stdout),
         String::from_utf8_lossy(&created.stderr));
     let alias = junction.join(original.file_name().unwrap());
     assert!(alias.is_file(), "positive control: junction must resolve to the actual executable");
