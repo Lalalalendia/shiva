@@ -114,7 +114,13 @@ pub(crate) fn pin_executable(settings: &WorkerSettings) -> Result<File, ClientEr
     }
     Ok(file)
 }
+static APP_CONTAINER_PROFILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn profile_sid() -> io::Result<Sid> {
+    // Multiple parallel extraction calls must not race first-time Windows
+    // profile provisioning within the same user account/process.
+    let _serialization = APP_CONTAINER_PROFILE_LOCK.lock()
+        .map_err(|_| io::Error::other("AppContainer profile lock poisoned"))?;
     let name = wide(OsStr::new(PROFILE_NAME));
     let display = wide(OsStr::new("Akula Shiva sandbox (no capabilities)"));
     let mut sid = null_mut();
@@ -124,9 +130,17 @@ fn profile_sid() -> io::Result<Sid> {
     };
     if hr < 0 {
         // HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)
-        if hr as u32 != 0x8007_00B7 { return Err(io::Error::other("AppContainer profile unavailable")); }
+        if hr as u32 != 0x8007_00B7 {
+            return Err(io::Error::other(format!(
+                "AppContainer profile unavailable (HRESULT=0x{:08X})", hr as u32
+            )));
+        }
         let derived = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
-        if derived < 0 { return Err(io::Error::other("cannot derive AppContainer SID")); }
+        if derived < 0 {
+            return Err(io::Error::other(format!(
+                "AppContainer SID derivation failed (HRESULT=0x{:08X})", derived as u32
+            )));
+        }
     }
     if sid.is_null() { return Err(io::Error::other("empty AppContainer SID")); }
     Ok(Sid(sid))
@@ -213,10 +227,12 @@ impl WindowsChild {
 /// A live Job Object handle kills the process tree if the host drops the child.
 pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChild> {
     if !executable.is_absolute() { return Err(io::Error::other("worker path must be absolute")); }
-    let sid = profile_sid()?;
-    let job = create_job()?;
-    let (stdin_read, stdin_write) = make_pipe()?;
-    let (stdout_read, stdout_write) = make_pipe()?;
+    let sid = profile_sid().map_err(|e| io::Error::other(format!("profile setup: {e}")))?;
+    let job = create_job().map_err(|e| io::Error::other(format!("job setup: {e}")))?;
+    let (stdin_read, stdin_write) = make_pipe()
+        .map_err(|e| io::Error::other(format!("stdin pipe: {e}")))?;
+    let (stdout_read, stdout_write) = make_pipe()
+        .map_err(|e| io::Error::other(format!("stdout pipe: {e}")))?;
     // Win32 NUL is a device handle rather than a path in the user's vault.
     let nul = wide(OsStr::new("NUL"));
     let mut sa = SECURITY_ATTRIBUTES {
@@ -288,12 +304,12 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
         env.as_ptr().cast(), cwd.as_ptr(),
         (&startup.StartupInfo as *const STARTUPINFOW), &mut info
     ) };
-    if created == 0 { return Err(fail()); }
+    if created == 0 { return Err(io::Error::other(format!("CreateProcessW: {}", fail()))); }
     let process = Owned::new(info.hProcess)?;
     let thread = Owned::new(info.hThread)?;
     if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
         unsafe { windows_sys::Win32::System::Threading::TerminateProcess(process.raw(), 1); }
-        return Err(fail());
+        return Err(io::Error::other(format!("AssignProcessToJobObject: {}", fail())));
     }
     if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
         unsafe { TerminateJobObject(job.raw(), 1); }
