@@ -239,6 +239,8 @@ pub fn extract(
     if timeout { return Err(ClientError::TimedOut); }
     let status = status.ok_or(ClientError::WorkerFailed)?;
     if !status.success() {
+        #[cfg(all(windows, debug_assertions))]
+        eprintln!("SHIVA_WIN_WORKER_EXIT: {status:?}");
         return Err(ClientError::WorkerFailed);
     }
     input_result.map_err(|_| ClientError::Io)?;
