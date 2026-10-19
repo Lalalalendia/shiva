@@ -319,7 +319,10 @@ pub fn windows_denial_probe(
         write.to_string_lossy().into_owned(),
         port.to_string(),
     ];
-    let mut child = spawn(&settings.executable, &args).map_err(|_| ClientError::Io)?;
+    let mut child = spawn(&settings.executable, &args).map_err(|e| {
+        eprintln!("SHIVA_WIN_PROBE_LAUNCH_DIAGNOSTIC: {e}");
+        ClientError::Io
+    })?;
     drop(child.stdin.take());
     drop(child.stdout.take());
     let start = Instant::now();
