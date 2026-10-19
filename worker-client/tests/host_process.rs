@@ -101,8 +101,15 @@ fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
         .arg("/C").arg("exit 0").status()
         .expect("host must be able to start known system executable");
     assert!(control_child.success(), "host child-process positive control failed");
+    let aap_only = std::path::PathBuf::from(
+        std::env::var_os("SHIVA_TEST_AAP_ONLY_FILE")
+            .expect("mandatory LPAC ALL APPLICATION PACKAGES denial fixture missing")
+    );
+    assert!(aap_only.is_file(), "AAP-only fixture missing");
+    assert_eq!(std::fs::read(&aap_only).unwrap(),
+        b"shiva-aap-canary", "host must be able to read AAP-only control");
     let config = settings(worker_path());
-    let result = windows_denial_probe(&config, &sentinel, &attempted_write, port);
+    let result = windows_denial_probe(&config, &sentinel, &attempted_write, port, &aap_only);
     assert!(result.is_ok(), "native AppContainer/Job deny probe failed: {result:?}");
     assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "PRIVATE-VALUE-DO-NOT-EXPOSE");
     assert!(!attempted_write.exists(), "restricted child wrote outside sandbox");
