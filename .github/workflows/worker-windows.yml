@@ -80,7 +80,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Package SID binary RX grant failed" }
           # This file is readable through ALL APPLICATION PACKAGES, but has
           # *no* grant to our exact AppContainer SID. LPAC must fail to read.
-          $fixture = Join-Path $env:RUNNER_TEMP "shiva-aap-only-control.txt"
+          # Same already-traversable directory as the worker, so the denial
+          # cannot be explained by failure to traverse the parent folders.
+          $fixture = Join-Path (Split-Path -Parent $exe) "shiva-aap-only-control.txt"
           [System.IO.File]::WriteAllText($fixture, "shiva-aap-canary",
               [System.Text.UTF8Encoding]::new($false))
           $hostSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -88,6 +90,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Canary inheritance removal failed" }
           & icacls.exe $fixture /grant:r "*$($hostSid):(R)" "*S-1-15-2-1:(R)" | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "AAP canary ACL grant failed" }
+          $canaryAcl = (& icacls.exe $fixture) -join "\n"
+          if ($canaryAcl -match [regex]::Escape($sid)) {
+            throw "AAP-only canary must not have the exact worker package SID ACE"
+          }
           if ([System.IO.File]::ReadAllText($fixture) -ne "shiva-aap-canary") {
             throw "Host AAP canary positive control failed"
           }
