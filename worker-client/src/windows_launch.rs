@@ -366,7 +366,10 @@ pub fn windows_denial_probe(
     loop {
         match child.try_wait().map_err(|_| ClientError::Io)? {
             Some(status) if status.success() => return Ok(()),
-            Some(_) => return Err(ClientError::WorkerFailed),
+            Some(status) => {
+                eprintln!("SHIVA_WIN_PROBE_WORKER_EXIT: {status:?}");
+                return Err(ClientError::WorkerFailed);
+            },
             None if start.elapsed() >= Duration::from_secs(8) => {
                 let _ = child.kill();
                 let _ = child.wait();
