@@ -43,17 +43,28 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     GetCurrentProcess, GetProcessMitigationPolicy, InitializeProcThreadAttributeList,
-    OpenProcessToken, ProcessChildProcessPolicy, ResumeThread, UpdateProcThreadAttribute,
+    OpenProcessToken, ProcessChildProcessPolicy, ProcessExtensionPointDisablePolicy,
+    ProcessStrictHandleCheckPolicy, ProcessSystemCallDisablePolicy,
+    ResumeThread, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
     PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES,
+    PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    STARTF_USESTDHANDLES,
     STARTUPINFOEXW, STARTUPINFOW,
 };
+use windows_sys::Win32::System::WindowsProgramming::
+    PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
 
 const PROFILE_NAME: &str = "AkulaShivaWorkerNoNetworkV1";
 const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 const JOB_MEMORY_BYTES: usize = 512 * 1024 * 1024;
+
+// Match the proven rar2 #260 MITIGATION_POLICY bit positions (Windows SDK).
+const MITIGATION_STRICT_HANDLE_ALWAYS_ON: u64 = 1u64 << 24;
+const MITIGATION_WIN32K_DISABLE_ALWAYS_ON: u64 = 1u64 << 28;
+const MITIGATION_EXTENSION_POINT_DISABLE_ALWAYS_ON: u64 = 1u64 << 32;
 
 fn fail() -> io::Error { io::Error::last_os_error() }
 fn wide(text: &OsStr) -> Vec<u16> {
@@ -225,6 +236,27 @@ fn verify_pre_resume(process: HANDLE, job: HANDLE) -> io::Result<()> {
     if child_flags & 1 == 0 {
         return Err(io::Error::other("attestation: child creation is not restricted"));
     }
+    // Do not trust intended creation flags: the suspended child must
+    // demonstrably have every admitted OS mitigation before any byte is sent.
+    for (policy, label) in [
+        (ProcessSystemCallDisablePolicy, "Win32k system calls"),
+        (ProcessExtensionPointDisablePolicy, "extension points"),
+        (ProcessStrictHandleCheckPolicy, "strict invalid-handle checks"),
+    ] {
+        let mut flags = 0u32;
+        if unsafe { GetProcessMitigationPolicy(
+            process, policy, (&mut flags as *mut u32).cast(), size_of::<u32>()
+        ) } == 0 {
+            return Err(io::Error::other(format!(
+                "attestation: cannot query {label}: {}", fail()
+            )));
+        }
+        if flags & 1 == 0 {
+            return Err(io::Error::other(format!("attestation: {label} disabled")));
+        }
+    }
+    #[cfg(debug_assertions)]
+    eprintln!("SHIVA_WIN_PRE_RESUME_ATTESTATION=appcontainer,zero-capabilities,job,child,win32k,extension,strict-handles:pass");
     Ok(())
 }
 
@@ -322,13 +354,13 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
     // All pointed-to attribute inputs must outlive CreateProcessW. Never
     // return pointers to stack-local SECURITY_CAPABILITIES from a helper.
     let mut attr_bytes = 0usize;
-    unsafe { InitializeProcThreadAttributeList(null_mut(), 3, 0, &mut attr_bytes); }
+    unsafe { InitializeProcThreadAttributeList(null_mut(), 5, 0, &mut attr_bytes); }
     if attr_bytes == 0 || attr_bytes > 128 * 1024 {
         return Err(io::Error::other("process attribute list unavailable"));
     }
     let mut attr_storage = vec![0usize; attr_bytes.div_ceil(size_of::<usize>())];
     let list = attr_storage.as_mut_ptr() as *mut core::ffi::c_void;
-    if unsafe { InitializeProcThreadAttributeList(list, 3, 0, &mut attr_bytes) } == 0 {
+    if unsafe { InitializeProcThreadAttributeList(list, 5, 0, &mut attr_bytes) } == 0 {
         return Err(fail());
     }
     let attr_guard = Attrs(list);
@@ -336,6 +368,10 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
         AppContainerSid: sid.0, Capabilities: null_mut(), CapabilityCount: 0, Reserved: 0,
     };
     let child_policy = 0x01u32; // PROCESS_CREATION_CHILD_PROCESS_RESTRICTED
+    let lpac_policy = PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT;
+    let mitigation_policy = MITIGATION_STRICT_HANDLE_ALWAYS_ON
+        | MITIGATION_WIN32K_DISABLE_ALWAYS_ON
+        | MITIGATION_EXTENSION_POINT_DISABLE_ALWAYS_ON;
     if unsafe { UpdateProcThreadAttribute(list, 0,
         PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
         (&security_caps as *const SECURITY_CAPABILITIES).cast(),
@@ -352,6 +388,22 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
         (&child_policy as *const u32).cast(),
         size_of_val(&child_policy), null_mut(), null()) } == 0 {
         return Err(fail());
+    }
+    // LPAC removes ambient ALL APPLICATION PACKAGES authority. Never make
+    // the worker executable or its parent directories readable by changing
+    // ACLs here; the trusted package/CI must grant read+execute to the
+    // exact AppContainer SID before launch. A missing ACL fails closed.
+    if unsafe { UpdateProcThreadAttribute(list, 0,
+        PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY as usize,
+        (&lpac_policy as *const u32).cast(),
+        size_of_val(&lpac_policy), null_mut(), null()) } == 0 {
+        return Err(io::Error::other(format!("LPAC creation policy: {}", fail())));
+    }
+    if unsafe { UpdateProcThreadAttribute(list, 0,
+        PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
+        (&mitigation_policy as *const u64).cast(),
+        size_of_val(&mitigation_policy), null_mut(), null()) } == 0 {
+        return Err(io::Error::other(format!("worker creation mitigation policy: {}", fail())));
     }
     let mut cmd = command_line(executable, args)?;
     let program = wide(executable.as_os_str());
