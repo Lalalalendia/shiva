@@ -6,5 +6,6 @@ members = [
     "cli",
     "server",
     "test",
-    "shiva-wasm"
+    "shiva-wasm",
+    "extractor-protocol"
 ]
