@@ -88,6 +88,12 @@ fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
         .expect("host loopback positive control failed");
     let (_accepted, _) = listener.accept().unwrap();
     drop(reachable);
+    let system_root = std::env::var_os("SystemRoot").expect("missing host SystemRoot");
+    let cmd = std::path::PathBuf::from(system_root).join("System32").join("cmd.exe");
+    let control_child = std::process::Command::new(&cmd)
+        .arg("/C").arg("exit 0").status()
+        .expect("host must be able to start known system executable");
+    assert!(control_child.success(), "host child-process positive control failed");
     let config = settings(worker_path());
     let result = windows_denial_probe(&config, &sentinel, &attempted_write, port);
     assert!(result.is_ok(), "native AppContainer/Job deny probe failed: {result:?}");
