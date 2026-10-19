@@ -1,0 +1,41 @@
+name: Shiva worker host boundary
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'worker-client/**'
+      - 'worker/**'
+      - 'extractor-protocol/**'
+      - '.github/workflows/worker-host.yml'
+      - 'docs/architecture/shiva-worker-host-v1.md'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'worker-client/**'
+      - 'worker/**'
+      - 'extractor-protocol/**'
+      - '.github/workflows/worker-host.yml'
+      - 'docs/architecture/shiva-worker-host-v1.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  worker-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build exact sibling worker
+        run: cargo build -p shiva-worker
+      - name: Verify pinned binary, timeout, partial/error and UTF-8
+        env:
+          SHIVA_TEST_WORKER_BIN: ${{ github.workspace }}/target/debug/shiva-worker
+        run: cargo test -p shiva-worker-client -- --nocapture
+      - name: Check host contract build
+        run: cargo check -p shiva-worker-client
