@@ -5,8 +5,8 @@ use anyhow;
 use bytes::Bytes;
 use comemo::Prehashed;
 use log::warn;
-use std::path::Path;
-use std::{collections::HashMap, io::Cursor};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use time::{OffsetDateTime, UtcOffset};
 
 use typst::{
@@ -28,113 +28,138 @@ pub struct ShivaWorld {
 }
 
 impl ShivaWorld {
-    pub fn new(source: String, img_map: HashMap<String, typst::foundations::Bytes>) -> Self {
-        let source = Source::detached(source);
+    /// Construct a PDF world with no implicit network or filesystem writes.
+    ///
+    /// Fonts must already be provisioned. The host may select an existing
+    /// directory via SHIVA_FONT_DIR; otherwise the local ./fonts directory
+    /// is used. In Akula this directory must be explicitly authorized.
+    pub fn new(
+        source: String,
+        img_map: HashMap<String, typst::foundations::Bytes>,
+    ) -> anyhow::Result<Self> {
+        let font_dir = std::env::var_os("SHIVA_FONT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("fonts"));
+        Self::with_font_dir(source, img_map, &font_dir)
+    }
 
-        let folder = "fonts";
+    /// Read only caller-provisioned font files from a bounded local directory.
+    /// Invalid fonts and unexpected file types are skipped; the absence of
+    /// usable fonts is a normal error rather than a panic or download.
+    pub fn with_font_dir(
+        source: String,
+        img_map: HashMap<String, typst::foundations::Bytes>,
+        font_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        const MAX_FILES: usize = 256;
+        const MAX_FONT_SIZE: u64 = 64 * 1024 * 1024;
+        const MAX_TOTAL_SIZE: u64 = 256 * 1024 * 1024;
+        const MAX_FACES_PER_FILE: u32 = 64;
 
-        // Check if the "fonts" folder exists
-        if !std::path::Path::new(folder).exists() {
-            // Create the "fonts" folder
-            std::fs::create_dir_all(folder).expect("Failed to create folder");
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(font_dir)? {
+            if paths.len() >= MAX_FILES {
+                anyhow::bail!("font directory contains too many entries");
+            }
+            paths.push(entry?.path());
+        }
+        paths.sort();
 
-            // Download fonts
-            let font_info = vec![
-                ("DejaVuSansMono-Bold.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/DejaVuSansMono-Bold.ttf"),
-                ("DejaVuSansMono.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/DejaVuSansMono.ttf"),
-                ("FiraMath-Regular.otf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/FiraMath-Regular.otf"),
-                ("IBMPlexSerif-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/IBMPlexSerif-Regular.ttf"),
-                ("InriaSerif-BoldItalic.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/InriaSerif-BoldItalic.ttf"),
-                ("InriaSerif-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/InriaSerif-Regular.ttf"),
-                ("LinLibertine_R.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/LinLibertine_R.ttf"),
-                ("LinLibertine_RB.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/LinLibertine_RB.ttf"),
-                ("LinLibertine_RBI.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/LinLibertine_RBI.ttf"),
-                ("LinLibertine_RI.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/LinLibertine_RI.ttf"),
-                ("Nerd.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/Nerd.ttf"),
-                ("NewCM10-Bold.otf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NewCM10-Bold.otf"),
-                ("NewCM10-Regular.otf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NewCM10-Regular.otf"),
-                ("NewCMMath-Book.otf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NewCMMath-Book.otf"),
-                ("NewCMMath-Regular.otf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NewCMMath-Regular.otf"),
-                ("NotoColorEmoji.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NotoColorEmoji.ttf"),
-                ("NotoSansArabic-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NotoSansArabic-Regular.ttf"),
-                ("NotoSansSymbols2-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NotoSansSymbols2-Regular.ttf"),
-                ("NotoSerifCJKsc-Regular.otf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NotoSerifCJKsc-Regular.otf"),
-                ("NotoSerifHebrew-Bold.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NotoSerifHebrew-Bold.ttf"),
-                ("NotoSerifHebrew-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/NotoSerifHebrew-Regular.ttf"),
-                ("PTSans-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/PTSans-Regular.ttf"),
-                ("Roboto-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/Roboto-Regular.ttf"),
-                ("TwitterColorEmoji.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/TwitterColorEmoji.ttf"),
-                ("Ubuntu-Regular.ttf", "https://github.com/igumnoff/shiva/raw/main/lib/fonts/Ubuntu-Regular.ttf"),
-            ];
+        let mut fonts = Vec::new();
+        let mut total_size = 0u64;
+        for path in paths {
+            // Do not follow symlinked fonts. The requested font directory
+            // is host-controlled, not provided by a document being parsed.
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() {
+                continue;
+            }
+            let valid_extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    ext.eq_ignore_ascii_case("ttf")
+                        || ext.eq_ignore_ascii_case("otf")
+                        || ext.eq_ignore_ascii_case("ttc")
+                })
+                .unwrap_or(false);
+            if !valid_extension {
+                continue;
+            }
+            if metadata.len() > MAX_FONT_SIZE {
+                anyhow::bail!("font is too large");
+            }
+            total_size = total_size
+                .checked_add(metadata.len())
+                .ok_or_else(|| anyhow::anyhow!("font size overflow"))?;
+            if total_size > MAX_TOTAL_SIZE {
+                anyhow::bail!("font directory exceeds byte budget");
+            }
 
-            for (filename, url) in font_info {
-                download_font(url, folder, filename);
+            let buffer = typst::foundations::Bytes::from(std::fs::read(&path)?);
+            let face_count = ttf_parser::fonts_in_collection(&buffer).unwrap_or(1);
+            if face_count > MAX_FACES_PER_FILE {
+                anyhow::bail!("font collection exceeds face budget");
+            }
+            for face in 0..face_count {
+                if let Some(font) = Font::new(buffer.clone(), face) {
+                    fonts.push(font);
+                }
             }
         }
+        if fonts.is_empty() {
+            anyhow::bail!("font directory has no usable fonts; configure SHIVA_FONT_DIR");
+        }
 
-        let fonts = std::fs::read_dir(folder)
-            .unwrap()
-            .map(Result::unwrap)
-            .flat_map(|entry| {
-                let path = entry.path();
-                let bytes = std::fs::read(&path).unwrap();
-                let buffer = typst::foundations::Bytes::from(bytes);
-                let face_count = ttf_parser::fonts_in_collection(&buffer).unwrap_or(1);
-                (0..face_count).map(move |face| {
-                    Font::new(buffer.clone(), face).unwrap_or_else(|| {
-                        panic!("failed to load font from {path:?} (face index {face})");
-                    })
-                })
-            })
-            .collect::<Vec<Font>>();
-
-        Self {
+        let source = Source::detached(source);
+        Ok(Self {
             book: Prehashed::new(FontBook::from_fonts(&fonts)),
             fonts,
             library: Prehashed::new(Library::default()),
             source,
             img_map,
-        }
+        })
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn download_font(url: &str, folder: &str, filename: &str) {
-    use log::info;
+#[cfg(test)]
+mod offline_font_tests {
+    use super::*;
 
-    let font_path = Path::new(folder).join(filename);
+    #[test]
+    fn missing_font_directory_does_not_create_or_download() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("test")
+            .join("missing-offline-fonts");
+        assert!(!folder.exists(), "fixture must be absent");
+        let world = ShivaWorld::with_font_dir("Hello".to_string(), HashMap::new(), &folder);
+        assert!(world.is_err(), "missing fonts must be a normal error");
+        assert!(!folder.exists(), "Shiva must not create the directory");
+    }
 
-    info!("Downloading font file {}...", font_path.display());
+    #[test]
+    fn checked_in_fonts_load_without_network() -> anyhow::Result<()> {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+        let world = ShivaWorld::with_font_dir("Hello".to_string(), HashMap::new(), &folder)?;
+        assert!(!world.fonts.is_empty());
+        Ok(())
+    }
 
-    let request = ehttp::Request::get(url);
-    ehttp::fetch(request, move |result: ehttp::Result<ehttp::Response>| {
-        let mut reader = Cursor::new(result.unwrap().bytes);
-        let f = std::fs::File::create(&font_path).unwrap();
-        let mut writer = std::io::BufWriter::new(f);
+    #[test]
+    fn corrupt_font_is_not_a_panic() -> anyhow::Result<()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-        let _bytes_io_count = std::io::copy(&mut reader, &mut writer).unwrap();
-
-        info!("Font file {} downloaded successfully!", font_path.display());
-    });
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn download_font(url: &str, folder: &str, filename: &str) {
-    use log::info;
-
-    let font_path = Path::new(folder).join(filename);
-
-    info!("Downloading font file {}...", font_path.display());
-
-    let request = ehttp::Request::get(url);
-    let response = ehttp::fetch_blocking(&request);
-    let mut reader = Cursor::new(response.unwrap().bytes);
-    let f = std::fs::File::create(&font_path).unwrap();
-    let mut writer = std::io::BufWriter::new(f);
-
-    let _bytes_io_count = std::io::copy(&mut reader, &mut writer).unwrap();
-
-    info!("Font file {} downloaded successfully!", font_path.display());
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let folder = std::env::temp_dir()
+            .join(format!("shiva-invalid-font-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&folder)?;
+        std::fs::write(folder.join("invalid.ttf"), b"not a font")?;
+        let result = ShivaWorld::with_font_dir("Hello".to_string(), HashMap::new(), &folder);
+        assert!(result.is_err());
+        std::fs::remove_file(folder.join("invalid.ttf"))?;
+        std::fs::remove_dir(folder)?;
+        Ok(())
+    }
 }
 
 impl World for ShivaWorld {
