@@ -1,0 +1,13 @@
+[package]
+name = "shiva-worker-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Pinned binary host supervisor for standalone, untrusted Shiva extractor output"
+
+[dependencies]
+shiva-extractor-protocol = { path = "../extractor-protocol" }
+blake3 = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -8,5 +8,6 @@ members = [
     "test",
     "shiva-wasm",
     "extractor-protocol",
-    "worker"
+    "worker",
+    "worker-client"
 ]
