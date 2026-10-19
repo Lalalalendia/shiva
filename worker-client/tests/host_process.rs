@@ -116,3 +116,55 @@ fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
     std::fs::remove_file(&sentinel).unwrap();
     std::fs::remove_dir(&protected).unwrap();
 }
+
+
+/// Prove JOB_LIST works when the host itself already belongs to an outer Job.
+/// Run the restricted host in its own test subprocess so it cannot contaminate
+/// unrelated tests or inherit their process-wide Job membership.
+#[cfg(windows)]
+#[test]
+fn nested_outer_job_allows_atomic_inner_worker_launch() {
+    const CHILD: &str = "SHIVA_TEST_NESTED_JOB_HOST";
+    if std::env::var_os(CHILD).is_none() {
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new(exe)
+            .arg("--exact")
+            .arg("nested_outer_job_allows_atomic_inner_worker_launch")
+            .arg("--nocapture")
+            .env(CHILD, "1")
+            .output()
+            .expect("spawn isolated outer-job host");
+        assert!(output.status.success(),
+            "nested job subprocess failed: status={:?}; stdout={}; stderr={}",
+            output.status, String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use std::ptr::null;
+
+    struct OuterJob(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for OuterJob {
+        fn drop(&mut self) { unsafe { CloseHandle(self.0); } }
+    }
+    let raw = unsafe { CreateJobObjectW(null(), null()) };
+    assert!(!raw.is_null(), "CreateJobObjectW: {}", unsafe { GetLastError() });
+    let outer = OuterJob(raw);
+    let current = unsafe { GetCurrentProcess() };
+    assert_ne!(unsafe { AssignProcessToJobObject(outer.0, current) }, 0,
+        "outer Job assignment unavailable: {}", unsafe { GetLastError() });
+    let mut member = 0i32;
+    assert_ne!(unsafe { IsProcessInJob(current, outer.0, &mut member) }, 0);
+    assert_eq!(member, 1, "test host is not in its outer Job");
+
+    let cfg = settings(worker_path());
+    let verified = extract(&cfg, "nested_job_doc", "txt", "Вложенная работа 世界".as_bytes())
+        .expect("nested outer Job must not prevent contained Shiva extraction");
+    assert!(verified.blocks.iter().any(|block| block.text.contains("世界")));
+    eprintln!("SHIVA_WIN_NESTED_JOB_LIST=pass");
+}
