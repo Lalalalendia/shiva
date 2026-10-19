@@ -119,3 +119,26 @@ API sources:
 - https://learn.microsoft.com/windows/win32/secauthz/implementing-an-appcontainer
 - https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute
 - https://learn.microsoft.com/windows/win32/procthread/job-objects
+
+## Atomic Job membership at CreateProcessW — PR #9
+
+The Windows launcher now supplies a sixth process-creation attribute,
+`PROC_THREAD_ATTRIBUTE_JOB_LIST`, pointing to its already-configured Job
+handle. There is no subsequent `AssignProcessToJobObject` and **no fallback**
+to the previous assignment method on unsupported Windows configurations.
+The primary thread is still created suspended; the parent independently
+checks actual token, zero capabilities, exact Job membership, child-process
+restriction and LPAC mitigation policies before `ResumeThread` and before
+transmitting untrusted bytes. On any attestation/resume failure, the parent
+terminates the suspended process and Job.
+
+The standalone Windows CI test `nested_outer_job_allows_atomic_inner_worker_launch`
+spawns an isolated test host, assigns it to its own outer Job, and requires
+successful real TXT extraction via the inner worker Job. It does not change
+the security boundaries of other Windows tests. A fresh host-side marker
+`SHIVA_WIN_NESTED_JOB_LIST=pass` appears only on success. Existing Windows
+negative canaries and LPAC attestation remain required.
+
+A failure caused by job nesting or OS incompatibility is a test failure,
+not permission to skip the attribute. Real installed Windows, immutable
+signed package and anti-reparse checks still block Akula integration.
