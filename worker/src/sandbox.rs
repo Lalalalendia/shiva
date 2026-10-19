@@ -147,8 +147,16 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"))
         .join("System32").join("cmd.exe");
-    let denied_child = Command::new(cmd).arg("/C").arg("exit 0").status()
-        .map(|status| !status.success()).unwrap_or(true);
+    // Creation must fail, not merely a child that starts then exits badly.
+    // Otherwise STATUS_DLL_INIT_FAILED would create a false positive.
+    let denied_child = match Command::new(cmd).arg("/C").arg("exit 0").spawn() {
+        Err(_) => true,
+        Ok(mut child) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+    };
     // Debug-only flags contain no paths, document content or credentials.
     // The parent captures these only for an E2E containment audit.
     let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child}");
