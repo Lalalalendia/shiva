@@ -479,7 +479,7 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
 }
 #[cfg(debug_assertions)]
 pub fn windows_denial_probe(
-    settings: &WorkerSettings, read: &Path, write: &Path, port: u16
+    settings: &WorkerSettings, read: &Path, write: &Path, port: u16, aap_only: &Path
 ) -> Result<(), ClientError> {
     let _lock = pin_executable(settings)?;
     let args = vec![
@@ -487,6 +487,7 @@ pub fn windows_denial_probe(
         read.to_string_lossy().into_owned(),
         write.to_string_lossy().into_owned(),
         port.to_string(),
+        aap_only.to_string_lossy().into_owned(),
     ];
     let mut child = spawn(&settings.executable, &args).map_err(|e| {
         eprintln!("SHIVA_WIN_PROBE_LAUNCH_DIAGNOSTIC: {e}");
@@ -523,7 +524,7 @@ pub fn windows_denial_probe(
 }
 #[cfg(not(debug_assertions))]
 pub fn windows_denial_probe(
-    _: &WorkerSettings, _: &Path, _: &Path, _: u16
+    _: &WorkerSettings, _: &Path, _: &Path, _: u16, _: &Path
 ) -> Result<(), ClientError> {
     Err(ClientError::UnsupportedPlatform)
 }
