@@ -736,7 +736,7 @@ fn image_path_in_root(root: &str, image: &str, for_write: bool) -> anyhow::Resul
     let reference = Path::new(image);
     if image.is_empty()
         || image.contains(':')
-        || image.contains('\\\\')
+        || image.contains('\\')
         || !reference
             .components()
             .any(|part| matches!(part, Component::Normal(_)))
@@ -915,7 +915,7 @@ pub mod tests {
             "../{}",
             outside.file_name().ok_or_else(|| anyhow::anyhow!("missing filename"))?.to_string_lossy()
         );
-        for invalid in [&attempted_escape[..], ".", "../inside.png", r"..\\inside.png", r"\\\\server\\share\\image.png", "https://example.org/image.png"] {
+        for invalid in [&attempted_escape[..], ".", "../inside.png", r"..\inside.png", r"\\server\share\image.png", "https://example.org/image.png"] {
             assert!(loader(invalid).is_err(), "read accepted {invalid}");
             assert!(
                 saver(&Bytes::from_static(b"overwrite"), invalid).is_err(),
