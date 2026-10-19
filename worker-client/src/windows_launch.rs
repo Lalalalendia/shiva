@@ -25,13 +25,16 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
+use windows_sys::Win32::Security::{
+    FreeSid, GetTokenInformation, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
+    TOKEN_QUERY, TokenCapabilities, TokenIsAppContainer,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-    TerminateJobObject, JobObjectExtendedLimitInformation,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
+    SetInformationJobObject, TerminateJobObject, JobObjectExtendedLimitInformation,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
@@ -39,7 +42,8 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
+    GetCurrentProcess, GetProcessMitigationPolicy, InitializeProcThreadAttributeList,
+    OpenProcessToken, ProcessChildProcessPolicy, ResumeThread, UpdateProcThreadAttribute,
     WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
     EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
@@ -163,6 +167,74 @@ fn create_job() -> io::Result<Owned> {
     if ok == 0 { return Err(fail()); }
     Ok(job)
 }
+/// Independent parent-side attestation while the worker primary thread
+/// is still suspended and before any untrusted request bytes are written.
+/// This verifies the *actual process* rather than trusting launch flags.
+fn verify_pre_resume(process: HANDLE, job: HANDLE) -> io::Result<()> {
+    let mut raw_token = null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw_token) } == 0 {
+        return Err(io::Error::other(format!("attestation: OpenProcessToken: {}", fail())));
+    }
+    let token = Owned::new(raw_token)?;
+    let mut app = 0u32;
+    let mut returned = 0u32;
+    if unsafe { GetTokenInformation(
+        token.raw(), TokenIsAppContainer, (&mut app as *mut u32).cast(),
+        size_of::<u32>() as u32, &mut returned
+    ) } == 0 {
+        return Err(io::Error::other(format!("attestation: TokenIsAppContainer: {}", fail())));
+    }
+    if app != 1 || returned != size_of::<u32>() as u32 {
+        return Err(io::Error::other("attestation: worker token not AppContainer"));
+    }
+
+    // Query the exact TOKEN_GROUPS buffer required by the OS. Read GroupCount
+    // unaligned: Vec<u8> alignment alone does not justify casting to
+    // TOKEN_GROUPS and dereferencing its native-alignment fields.
+    let mut needed = 0u32;
+    unsafe { GetTokenInformation(token.raw(), TokenCapabilities, null_mut(), 0, &mut needed); }
+    if needed < size_of::<u32>() as u32 || needed > 64 * 1024 {
+        return Err(io::Error::other("attestation: invalid TokenCapabilities size"));
+    }
+    let mut capabilities = vec![0u8; needed as usize];
+    if unsafe { GetTokenInformation(
+        token.raw(), TokenCapabilities, capabilities.as_mut_ptr().cast(),
+        needed, &mut returned
+    ) } == 0 {
+        return Err(io::Error::other(format!("attestation: TokenCapabilities: {}", fail())));
+    }
+    if returned < size_of::<u32>() as u32 {
+        return Err(io::Error::other("attestation: truncated TokenCapabilities"));
+    }
+    let group_count = unsafe { std::ptr::read_unaligned(capabilities.as_ptr().cast::<u32>()) };
+    if group_count != 0 {
+        return Err(io::Error::other("attestation: unexpected AppContainer capabilities"));
+    }
+
+    let mut in_job = 0i32;
+    if unsafe { IsProcessInJob(process, job, &mut in_job) } == 0 || in_job != 1 {
+        return Err(io::Error::other("attestation: worker not in required Job Object"));
+    }
+    let mut child_flags = 0u32;
+    if unsafe { GetProcessMitigationPolicy(
+        process, ProcessChildProcessPolicy, (&mut child_flags as *mut u32).cast(),
+        size_of::<u32>()
+    ) } == 0 {
+        return Err(io::Error::other(format!("attestation: ProcessChildProcessPolicy: {}", fail())));
+    }
+    if child_flags & 1 == 0 {
+        return Err(io::Error::other("attestation: child creation is not restricted"));
+    }
+    Ok(())
+}
+
+/// Negative control: a normal unsandboxed host must never pass the exact
+/// process attestation applied to suspended Shiva children.
+#[cfg(debug_assertions)]
+pub fn normal_host_rejected_by_attestation() -> bool {
+    verify_pre_resume(unsafe { GetCurrentProcess() }, null_mut()).is_err()
+}
+
 fn make_pipe() -> io::Result<(Owned, Owned)> {
     let mut sa = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -329,8 +401,16 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
     let process = Owned::new(info.hProcess)?;
     let thread = Owned::new(info.hThread)?;
     if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
+        let reason = io::Error::other(format!("AssignProcessToJobObject: {}", fail()));
         unsafe { windows_sys::Win32::System::Threading::TerminateProcess(process.raw(), 1); }
-        return Err(io::Error::other(format!("AssignProcessToJobObject: {}", fail())));
+        return Err(reason);
+    }
+    // No untrusted bytes have been sent. Keep the thread suspended until
+    // independently verifying the actual token, zero capability set,
+    // membership in our exact Job, and child-process creation policy.
+    if let Err(reason) = verify_pre_resume(process.raw(), job.raw()) {
+        unsafe { TerminateJobObject(job.raw(), 1); }
+        return Err(reason);
     }
     if unsafe { ResumeThread(thread.raw()) } == u32::MAX {
         unsafe { TerminateJobObject(job.raw(), 1); }

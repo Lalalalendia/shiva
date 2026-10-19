@@ -1,6 +1,8 @@
 # Windows Shiva worker — P0 native AppContainer / Job preview
 
-Status: **Draft until exact-HEAD Windows real API tests complete**.
+Status: **Windows confinement PR #6 merged with exact-HEAD CI
+5/5 subprocess and 7/7 unit tests. PR #7 host-side attestation is a
+separate Draft security gate until its exact-HEAD Windows CI passes.**
 Repository: [Lalalalendia/shiva](https://github.com/Lalalalendia/shiva).
 Existing Linux work: PR #4 and #5. This is not an Akula release or a
 permission to index untrusted PDF/DOCX.
@@ -23,6 +25,18 @@ Only after successful AssignProcessToJobObject does the host
 ResumeThread. The worker checks TokenIsAppContainer,
 TokenCapabilities group count = 0, and IsProcessInJob **before reading
 any untrusted byte**.
+
+The separate parent-side attestation (PR #7) runs **after**
+AssignProcessToJobObject but **while the child thread is still suspended**:
+it independently queries the actual process's token (AppContainer and
+zero capability groups), verifies membership in the exact Job Object
+created by this launch, and confirms the system-enforced child-process
+mitigation is active. Any failure kills the suspended Job/process before
+the worker receives document bytes. A negative control proves an
+ordinary unconfined host process cannot pass that attestation; the
+existing positive E2E ensures the real worker can still parse Unicode
+TXT. These attestations are useful gates but do not prove binary/package
+identity, LPAC, or that additional mitigation policies are active.
 
 There is no ordinary std::process::Command fallback on Windows.
 Unsupported/unavailable AppContainer or Job APIs cause a hard failure.

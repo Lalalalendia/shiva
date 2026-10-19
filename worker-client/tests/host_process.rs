@@ -67,6 +67,13 @@ fn host_deadline_kills_unresponsive_pinned_child() {
     assert!(started.elapsed() < Duration::from_secs(3), "host must not wait for child sleep");
 }
 
+#[cfg(all(windows, debug_assertions))]
+#[test]
+fn normal_host_fails_child_containment_attestation() {
+    assert!(shiva_worker_client::normal_host_rejected_by_attestation(),
+        "host attestation accepted an ordinary unrestricted process");
+}
+
 #[cfg(windows)]
 #[test]
 fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
