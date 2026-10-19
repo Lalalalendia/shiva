@@ -19,13 +19,13 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FreeSid, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
+    CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT,
     INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
-use windows_sys::Win32::Security::{PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
+use windows_sys::Win32::Security::{FreeSid, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -183,44 +183,6 @@ fn command_line(executable: &Path, args: &[String]) -> io::Result<Vec<u16>> {
     out.push(0);
     Ok(out)
 }
-fn appcontainer_attributes(sid: &Sid, allowed: &mut [HANDLE; 3]) -> io::Result<(Vec<usize>, Attrs)> {
-    let mut bytes = 0usize;
-    unsafe { InitializeProcThreadAttributeList(null_mut(), 3, 0, &mut bytes); }
-    if bytes == 0 || bytes > 128 * 1024 { return Err(io::Error::other("attribute list unavailable")); }
-    let mut storage = vec![0usize; bytes.div_ceil(size_of::<usize>())];
-    let list = storage.as_mut_ptr() as *mut core::ffi::c_void;
-    if unsafe { InitializeProcThreadAttributeList(list, 3, 0, &mut bytes) } == 0 {
-        return Err(fail());
-    }
-    let guard = Attrs(list);
-    let caps = SECURITY_CAPABILITIES {
-        AppContainerSid: sid.0, Capabilities: null_mut(), CapabilityCount: 0, Reserved: 0,
-    };
-    let child_policy = 0x01u32; // PROCESS_CREATION_CHILD_PROCESS_RESTRICTED
-    let success = unsafe {
-        UpdateProcThreadAttribute(list, 0,
-            PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
-            (&caps as *const SECURITY_CAPABILITIES).cast(),
-            size_of_val(&caps), null_mut(), null())
-    };
-    if success == 0 { return Err(fail()); }
-    let success = unsafe {
-        UpdateProcThreadAttribute(list, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
-            allowed.as_ptr().cast(), size_of_val(allowed), null_mut(), null())
-    };
-    if success == 0 { return Err(fail()); }
-    let success = unsafe {
-        UpdateProcThreadAttribute(list, 0,
-            PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY as usize,
-            (&child_policy as *const u32).cast(), size_of_val(&child_policy),
-            null_mut(), null())
-    };
-    if success == 0 { return Err(fail()); }
-    // Keep caps and child_policy *alive*: attributes copy inline values on
-    // UpdateProcThreadAttribute, whereas SID/handle data stays referenced.
-    Ok((storage, guard))
-}
 pub(crate) struct WindowsChild {
     _job: Owned,
     process: Owned,
@@ -269,7 +231,40 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
         }
     }
     let mut allow = [stdin_read.raw(), stdout_write.raw(), stderr.raw()];
-    let (_attr_storage, _attributes) = appcontainer_attributes(&sid, &mut allow)?;
+    // All pointed-to attribute inputs must outlive CreateProcessW. Never
+    // return pointers to stack-local SECURITY_CAPABILITIES from a helper.
+    let mut attr_bytes = 0usize;
+    unsafe { InitializeProcThreadAttributeList(null_mut(), 3, 0, &mut attr_bytes); }
+    if attr_bytes == 0 || attr_bytes > 128 * 1024 {
+        return Err(io::Error::other("process attribute list unavailable"));
+    }
+    let mut attr_storage = vec![0usize; attr_bytes.div_ceil(size_of::<usize>())];
+    let list = attr_storage.as_mut_ptr() as *mut core::ffi::c_void;
+    if unsafe { InitializeProcThreadAttributeList(list, 3, 0, &mut attr_bytes) } == 0 {
+        return Err(fail());
+    }
+    let attr_guard = Attrs(list);
+    let security_caps = SECURITY_CAPABILITIES {
+        AppContainerSid: sid.0, Capabilities: null_mut(), CapabilityCount: 0, Reserved: 0,
+    };
+    let child_policy = 0x01u32; // PROCESS_CREATION_CHILD_PROCESS_RESTRICTED
+    if unsafe { UpdateProcThreadAttribute(list, 0,
+        PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES as usize,
+        (&security_caps as *const SECURITY_CAPABILITIES).cast(),
+        size_of_val(&security_caps), null_mut(), null()) } == 0 {
+        return Err(fail());
+    }
+    if unsafe { UpdateProcThreadAttribute(list, 0,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+        allow.as_mut_ptr().cast(), size_of_val(&allow), null_mut(), null()) } == 0 {
+        return Err(fail());
+    }
+    if unsafe { UpdateProcThreadAttribute(list, 0,
+        PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY as usize,
+        (&child_policy as *const u32).cast(),
+        size_of_val(&child_policy), null_mut(), null()) } == 0 {
+        return Err(fail());
+    }
     let mut cmd = command_line(executable, args)?;
     let program = wide(executable.as_os_str());
     let system_root = std::env::var_os("SystemRoot")
@@ -285,7 +280,7 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
     startup.StartupInfo.hStdInput = stdin_read.raw();
     startup.StartupInfo.hStdOutput = stdout_write.raw();
     startup.StartupInfo.hStdError = stderr.raw();
-    startup.lpAttributeList = _attributes.0;
+    startup.lpAttributeList = attr_guard.0;
     let mut info = PROCESS_INFORMATION::default();
     let created = unsafe { CreateProcessW(
         program.as_ptr(), cmd.as_mut_ptr(), null(), null(), 1,
