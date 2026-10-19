@@ -1,3 +1,6 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+// Stdio is explicitly redirected through inherited anonymous pipes;
+// no Win32 console/window station is needed by the untrusted worker.
 use std::io::{stdin, stdout};
 fn main() {
     // Do not include attacker-controlled parser errors, paths or document text
