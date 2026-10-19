@@ -497,7 +497,7 @@ pub fn windows_denial_probe(
     let mut diagnostic_pipe = child.stdout.take().ok_or(ClientError::Io)?;
     let diagnostics = std::thread::spawn(move || -> io::Result<Vec<u8>> {
         let mut sample = Vec::new();
-        diagnostic_pipe.by_ref().take(256).read_to_end(&mut sample)?;
+        diagnostic_pipe.by_ref().take(512).read_to_end(&mut sample)?;
         Ok(sample)
     });
     let started = Instant::now();
