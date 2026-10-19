@@ -1,0 +1,35 @@
+name: Shiva input safety
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/core.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/typst.rs'
+      - 'lib/Cargo.toml'
+      - 'docs/security/**'
+      - '.github/workflows/input-safety.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/core.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/typst.rs'
+      - 'lib/Cargo.toml'
+      - 'docs/security/**'
+      - '.github/workflows/input-safety.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image-io-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Image I/O boundary and Markdown tests (no PDF build)
+        run: cargo test -p shiva --no-default-features --features markdown --lib
