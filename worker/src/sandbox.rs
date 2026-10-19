@@ -127,6 +127,7 @@ pub fn confine() -> Result<(), &'static str> {
 pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str) -> bool {
     use std::fs::{File, OpenOptions};
     use std::net::{SocketAddr, TcpStream};
+    use windows_sys::Win32::Networking::WinSock::{WSAStartup, WSADATA, WSACleanup};
     use std::process::Command;
     use std::time::Duration;
     use std::io::Write;
@@ -152,10 +153,23 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str)
     let denied_aap_only = File::open(aap_only)
         .err().and_then(|e| e.raw_os_error()) == Some(5);
     checkpoint("aap-completed");
-    let denied_network = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
-        Ok(_) => false,
-        Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
-            || e.kind() == std::io::ErrorKind::TimedOut,
+    // std::net's Windows Winsock initializer asserts that WSAStartup == 0.
+    // In a zero-network LPAC that initialization itself may be denied,
+    // which must be a controlled security result, not a Rust panic (101).
+    // Positive host-control socket acceptance is proven separately in CI.
+    let mut wsa_data = unsafe { std::mem::zeroed::<WSADATA>() };
+    let startup = unsafe { WSAStartup(0x0202, &mut wsa_data) };
+    let denied_network = if startup != 0 {
+        checkpoint("winsock-unavailable");
+        true
+    } else {
+        let blocked = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
+            Ok(_) => false,
+            Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
+                || e.kind() == std::io::ErrorKind::TimedOut,
+        };
+        unsafe { WSACleanup(); }
+        blocked
     };
     // ActiveProcessLimit=1, plus AppContainer and child-process policy.
     let cmd = std::env::var_os("SystemRoot")
