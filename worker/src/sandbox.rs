@@ -130,7 +130,16 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str)
     use std::process::Command;
     use std::time::Duration;
     use std::io::Write;
+    // Fixed-size stage names only: no user paths or document bytes in logs.
+    let checkpoint = |stage: &str| {
+        let out = std::io::stdout();
+        let mut locked = out.lock();
+        let _ = writeln!(locked, "SHIVA_WIN_PROBE_STAGE={stage}");
+        let _ = locked.flush();
+    };
+    checkpoint("start");
     let denied_read = File::open(read).err().and_then(|e| e.raw_os_error()) == Some(5);
+    checkpoint("read-completed");
     let denied_write = OpenOptions::new().write(true).create_new(true).open(write)
         .err().and_then(|e| e.raw_os_error()) == Some(5);
     // WFP/AppContainer may silently drop a prohibited connection instead of
@@ -139,8 +148,10 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str)
     let target = SocketAddr::from(([127, 0, 0, 1], port));
     // LPAC must not gain the ambient ALL APPLICATION PACKAGES grant.
     // CI creates a file granted to AAP + host user but not this package SID.
+    checkpoint("write-completed");
     let denied_aap_only = File::open(aap_only)
         .err().and_then(|e| e.raw_os_error()) == Some(5);
+    checkpoint("aap-completed");
     let denied_network = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
         Ok(_) => false,
         Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
@@ -153,6 +164,7 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str)
         .join("System32").join("cmd.exe");
     // Creation must fail, not merely a child that starts then exits badly.
     // Otherwise STATUS_DLL_INIT_FAILED would create a false positive.
+    checkpoint("network-completed");
     let denied_child = match Command::new(cmd).arg("/C").arg("exit 0").spawn() {
         Err(_) => true,
         Ok(mut child) => {
@@ -161,6 +173,7 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str)
             false
         }
     };
+    checkpoint("child-completed");
     // Debug-only flags contain no paths, document content or credentials.
     // The parent captures these only for an E2E containment audit.
     let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child},{denied_aap_only}");
