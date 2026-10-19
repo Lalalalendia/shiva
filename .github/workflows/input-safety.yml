@@ -1,0 +1,40 @@
+name: Shiva input safety
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/core.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/typst.rs'
+      - 'lib/Cargo.toml'
+      - 'docs/security/**'
+      - '.github/workflows/input-safety.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/core.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/typst.rs'
+      - 'lib/Cargo.toml'
+      - 'docs/security/**'
+      - '.github/workflows/input-safety.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  image-io-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Existing upstream Markdown unit tests import HTML and serde_xml_rs
+      # unconditionally under cfg(test). Compile those feature dependencies
+      # without linking the expensive PDF / Typst stack.
+      - name: Check non-PDF extractor configuration
+        run: cargo check -p shiva --no-default-features --features markdown,html,xml
+      - name: Verify image path denial and allowed writes
+        run: cargo test -p shiva --no-default-features --features markdown,html,xml --lib core::tests::image_io_stays_inside_its_selected_root

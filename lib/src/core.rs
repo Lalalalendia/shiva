@@ -724,25 +724,85 @@ pub struct ImageDimension {
     pub height: Option<String>,
 }
 
-pub fn disk_image_loader(path: &str) -> impl Fn(&str) -> anyhow::Result<Bytes> {
-    let path = path.to_string();
-    let image_loader = move |image: &str| -> anyhow::Result<Bytes> {
-        let image_path = format!("{}/{}", path, image);
-        info!("Loading image: {}", image_path);
-        let bytes = std::fs::read(image_path)?;
-        Ok(Bytes::from(bytes))
-    };
-    image_loader
+/// Resolve an image reference inside an explicitly supplied image root.
+///
+/// Reject absolute paths, parent traversals and Windows alternate-stream paths.
+/// Canonical paths block ordinary symlink escapes, but these checks are not
+/// atomic against a concurrent attacker changing filesystem entries. Untrusted
+/// documents still need an OS-constrained worker with no unrelated file access.
+fn image_path_in_root(root: &str, image: &str, for_write: bool) -> anyhow::Result<std::path::PathBuf> {
+    use std::path::{Component, Path};
+
+    let reference = Path::new(image);
+    if image.is_empty()
+        || image.contains(':')
+        || image.contains('\\')
+        || !reference
+            .components()
+            .any(|part| matches!(part, Component::Normal(_)))
+        || reference
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        anyhow::bail!("image reference must stay relative to its image root");
+    }
+
+    let root = std::fs::canonicalize(root)?;
+    if !root.is_dir() {
+        anyhow::bail!("image root is not a directory");
+    }
+    let path = root.join(reference);
+
+    if for_write {
+        let parent = path.parent().ok_or_else(|| anyhow::anyhow!("image has no parent"))?;
+        let parent = std::fs::canonicalize(parent)?;
+        if !parent.starts_with(&root) {
+            anyhow::bail!("image output parent escapes its image root");
+        }
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("image has no filename"))?;
+        let output = parent.join(file_name);
+        match std::fs::symlink_metadata(&output) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!("refusing to overwrite an image symlink")
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        Ok(output)
+    } else {
+        let input = std::fs::canonicalize(path)?;
+        if !input.starts_with(&root) {
+            anyhow::bail!("image source escapes its image root");
+        }
+        Ok(input)
+    }
 }
 
+/// Read a local image. The caller must supply a root that is already permitted
+/// by the host. This lexical/canonical check is not a sandbox against TOCTOU.
+pub fn disk_image_loader(path: &str) -> impl Fn(&str) -> anyhow::Result<Bytes> {
+    let root = path.to_string();
+    move |image: &str| -> anyhow::Result<Bytes> {
+        let image_path = image_path_in_root(&root, image, false)?;
+        // Do not log full paths: image filenames may contain private content.
+        info!("Loading image within an allowed root");
+        let bytes = std::fs::read(image_path)?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
+/// Write an image only under its supplied root. This retains the existing
+/// overwrite behavior for normal files; it refuses symlink destinations.
 pub fn disk_image_saver(path: &str) -> impl Fn(&Bytes, &str) -> anyhow::Result<()> {
-    let path = path.to_string();
-    let image_saver = move |bytes: &Bytes, image: &str| -> anyhow::Result<()> {
-        let image_path = format!("{}/{}", path, image);
+    let root = path.to_string();
+    move |bytes: &Bytes, image: &str| -> anyhow::Result<()> {
+        let image_path = image_path_in_root(&root, image, true)?;
         std::fs::write(image_path, bytes)?;
         Ok(())
-    };
-    image_saver
+    }
 }
 
 // Opinion (JohnScience): The variants of this enum should be enabled/disabled based on the features.
@@ -833,6 +893,67 @@ pub mod tests {
         DocumentType::XLSX,
         DocumentType::ODS,
     ];
+
+    #[test]
+    fn image_io_stays_inside_its_selected_root() -> anyhow::Result<()> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let root = std::env::temp_dir().join(format!("shiva-image-io-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let outside = root.with_extension("outside");
+        std::fs::write(&outside, b"protected")?;
+        let inside = root.join("inside.png");
+        std::fs::write(&inside, b"allowed")?;
+
+        let root_str = root.to_str().ok_or_else(|| anyhow::anyhow!("invalid temp dir"))?;
+        let loader = disk_image_loader(root_str);
+        let saver = disk_image_saver(root_str);
+        assert_eq!(&loader("./inside.png")?[..], b"allowed");
+
+        let attempted_escape = format!(
+            "../{}",
+            outside.file_name().ok_or_else(|| anyhow::anyhow!("missing filename"))?.to_string_lossy()
+        );
+        for invalid in [&attempted_escape[..], ".", "../inside.png", r"..\inside.png", r"\\server\share\image.png", "https://example.org/image.png"] {
+            assert!(loader(invalid).is_err(), "read accepted {invalid}");
+            assert!(
+                saver(&Bytes::from_static(b"overwrite"), invalid).is_err(),
+                "write accepted {invalid}"
+            );
+        }
+        let absolute = outside.to_string_lossy();
+        assert!(loader(&absolute).is_err());
+        assert!(saver(&Bytes::from_static(b"overwrite"), &absolute).is_err());
+
+        saver(&Bytes::from_static(b"updated"), "inside.png")?;
+        assert_eq!(std::fs::read(&inside)?, b"updated");
+        assert_eq!(std::fs::read(&outside)?, b"protected");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(&outside, root.join("outside-link.png"))?;
+            assert!(loader("outside-link.png").is_err());
+            assert!(saver(&Bytes::from_static(b"overwrite"), "outside-link.png").is_err());
+            assert_eq!(std::fs::read(&outside)?, b"protected");
+
+            // A directory symlink must not permit an escape either.
+            let external_dir = root.with_extension("external-dir");
+            std::fs::create_dir(&external_dir)?;
+            symlink(&external_dir, root.join("linked-dir"))?;
+            assert!(saver(&Bytes::from_static(b"overwrite"), "linked-dir/file.png").is_err());
+            assert!(!external_dir.join("file.png").exists());
+            std::fs::remove_file(root.join("outside-link.png"))?;
+            std::fs::remove_file(root.join("linked-dir"))?;
+            std::fs::remove_dir(external_dir)?;
+        }
+
+        std::fs::remove_file(inside)?;
+        std::fs::remove_dir(root)?;
+        std::fs::remove_file(outside)?;
+        Ok(())
+    }
 
     #[test]
     fn test_document_type_count() {
