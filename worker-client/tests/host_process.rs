@@ -116,3 +116,35 @@ fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
     std::fs::remove_file(&sentinel).unwrap();
     std::fs::remove_dir(&protected).unwrap();
 }
+
+
+/// An existing junction in any installed-worker pathname component must be
+/// rejected before CreateProcessW, even when the redirected EXE has the exact
+/// configured BLAKE3. This does not replace protected installer directory ACLs.
+#[cfg(windows)]
+#[test]
+fn junctioned_worker_ancestor_is_rejected_before_spawn() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let worker = worker_path();
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let fixture = std::env::temp_dir()
+        .join(format!("shiva-image-identity-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&fixture).unwrap();
+    let junction = fixture.join("fake-install");
+    let worker_dir = worker.parent().expect("worker directory");
+    let command = format!("mklink /J \"{}\" \"{}\"", junction.display(), worker_dir.display());
+    let created = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", &command]).output().expect("create junction fixture");
+    assert!(created.status.success(), "junction fixture failed: {}",
+        String::from_utf8_lossy(&created.stderr));
+    let alias = junction.join(worker.file_name().unwrap());
+    assert!(alias.is_file(), "host positive control: alias must resolve to worker EXE");
+    let mut cfg = settings(worker);
+    cfg.executable = alias;
+    let result = extract(&cfg, "junction_probe", "txt", b"must never launch");
+    assert!(matches!(result, Err(ClientError::InvalidConfiguration)),
+        "a redirected installed worker path was not rejected: {result:?}");
+    std::fs::remove_dir(&junction).expect("remove junction fixture only");
+    std::fs::remove_dir(&fixture).expect("remove fixture root");
+    eprintln!("SHIVA_WIN_REPARSE_ANCESTOR_DENIED=pass");
+}
