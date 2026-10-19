@@ -38,6 +38,40 @@ existing positive E2E ensures the real worker can still parse Unicode
 TXT. These attestations are useful gates but do not prove binary/package
 identity, LPAC, or that additional mitigation policies are active.
 
+## rar2 #260 donor gap — LPAC and OS mitigations
+
+PR #8 narrows the previously proven Shiva AppContainer to **LPAC** by adding
+`PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` set to
+`PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT`. It also requires the
+same documented mitigation bits independently accepted in rar2 #260:
+strict invalid-handle checks, Win32k system calls disabled, and legacy
+extension points disabled. The host queries the *actual* suspended child
+using `GetProcessMitigationPolicy` for all three and terminates the Job on
+any missing flag or failed query. This is not a request to add broad
+capabilities to keep libraries running.
+
+**Deployment ACL law:** the current Shiva launcher does NOT call
+`SetNamedSecurityInfo`, grant AppContainer ACLs, or chmod source paths.
+Only the trusted installer/build fixture may give the exact profile SID
+read+execute access to the installed, verified `shiva-worker.exe`
+and narrowly necessary directory traversals. The earlier test's broad
+ALL APPLICATION PACKAGES RX grant is deliberately removed. Real Windows
+CI derives the fixed profile SID and creates a separate AAP-only readable
+canary which LPAC must not read. A normal host positive-control read
+ensures the canary exists.
+
+`PROC_THREAD_ATTRIBUTE_JOB_LIST` is deliberately **not** changed in this
+PR: Shiva still assigns its Job to the suspended child and separately
+attests Job membership before calling ResumeThread. Atomic job-list
+assignment from rar2 #260 is a distinct follow-up to avoid combining
+two compatibility/failure causes. Exact Windows installer code signing,
+protected directory ACLs, reparse-point-resistant executable identity
+and real-PC acceptance remain separate release blockers.
+
+Donor proof: https://github.com/Lalalalendia/rar2/pull/260
+Microsoft API: https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer
+Microsoft mitigation policies: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getprocessmitigationpolicy
+
 There is no ordinary std::process::Command fallback on Windows.
 Unsupported/unavailable AppContainer or Job APIs cause a hard failure.
 The old Linux seccomp implementation stays independent.

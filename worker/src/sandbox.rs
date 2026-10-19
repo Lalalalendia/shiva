@@ -124,23 +124,52 @@ pub fn confine() -> Result<(), &'static str> {
 }
 
 #[cfg(all(debug_assertions, windows))]
-pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
+pub fn probe_windows_denials(read: &str, write: &str, port: u16, aap_only: &str) -> bool {
     use std::fs::{File, OpenOptions};
     use std::net::{SocketAddr, TcpStream};
+    use windows_sys::Win32::Networking::WinSock::{WSAStartup, WSADATA, WSACleanup};
     use std::process::Command;
     use std::time::Duration;
     use std::io::Write;
+    // Fixed-size stage names only: no user paths or document bytes in logs.
+    let checkpoint = |stage: &str| {
+        let out = std::io::stdout();
+        let mut locked = out.lock();
+        let _ = writeln!(locked, "SHIVA_WIN_PROBE_STAGE={stage}");
+        let _ = locked.flush();
+    };
+    checkpoint("start");
     let denied_read = File::open(read).err().and_then(|e| e.raw_os_error()) == Some(5);
+    checkpoint("read-completed");
     let denied_write = OpenOptions::new().write(true).create_new(true).open(write)
         .err().and_then(|e| e.raw_os_error()) == Some(5);
     // WFP/AppContainer may silently drop a prohibited connection instead of
     // immediately reporting WSAEACCES. Bound the probe independently.
     // The trusted host positively verifies this loopback listener first.
     let target = SocketAddr::from(([127, 0, 0, 1], port));
-    let denied_network = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
-        Ok(_) => false,
-        Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
-            || e.kind() == std::io::ErrorKind::TimedOut,
+    // LPAC must not gain the ambient ALL APPLICATION PACKAGES grant.
+    // CI creates a file granted to AAP + host user but not this package SID.
+    checkpoint("write-completed");
+    let denied_aap_only = File::open(aap_only)
+        .err().and_then(|e| e.raw_os_error()) == Some(5);
+    checkpoint("aap-completed");
+    // std::net's Windows Winsock initializer asserts that WSAStartup == 0.
+    // In a zero-network LPAC that initialization itself may be denied,
+    // which must be a controlled security result, not a Rust panic (101).
+    // Positive host-control socket acceptance is proven separately in CI.
+    let mut wsa_data = unsafe { std::mem::zeroed::<WSADATA>() };
+    let startup = unsafe { WSAStartup(0x0202, &mut wsa_data) };
+    let denied_network = if startup != 0 {
+        checkpoint("winsock-unavailable");
+        true
+    } else {
+        let blocked = match TcpStream::connect_timeout(&target, Duration::from_millis(400)) {
+            Ok(_) => false,
+            Err(e) => matches!(e.raw_os_error(), Some(10013 | 10060 | 10051 | 10050))
+                || e.kind() == std::io::ErrorKind::TimedOut,
+        };
+        unsafe { WSACleanup(); }
+        blocked
     };
     // ActiveProcessLimit=1, plus AppContainer and child-process policy.
     let cmd = std::env::var_os("SystemRoot")
@@ -149,6 +178,7 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
         .join("System32").join("cmd.exe");
     // Creation must fail, not merely a child that starts then exits badly.
     // Otherwise STATUS_DLL_INIT_FAILED would create a false positive.
+    checkpoint("network-completed");
     let denied_child = match Command::new(cmd).arg("/C").arg("exit 0").spawn() {
         Err(_) => true,
         Ok(mut child) => {
@@ -157,10 +187,11 @@ pub fn probe_windows_denials(read: &str, write: &str, port: u16) -> bool {
             false
         }
     };
+    checkpoint("child-completed");
     // Debug-only flags contain no paths, document content or credentials.
     // The parent captures these only for an E2E containment audit.
-    let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child}");
-    denied_read && denied_write && denied_network && denied_child
+    let _ = writeln!(std::io::stdout(), "SHIVA_WIN_DENIAL_FLAGS={denied_read},{denied_write},{denied_network},{denied_child},{denied_aap_only}");
+    denied_read && denied_write && denied_network && denied_child && denied_aap_only
 }
 
 /// This executable's probe is debug-only. A success code means denial checks
