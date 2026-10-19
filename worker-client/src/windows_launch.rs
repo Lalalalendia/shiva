@@ -288,7 +288,28 @@ pub(crate) fn spawn(executable: &Path, args: &[String]) -> io::Result<WindowsChi
     let directory = std::path::PathBuf::from(system_root).join("System32");
     if !directory.is_dir() { return Err(io::Error::other("system directory unavailable")); }
     let cwd = wide(directory.as_os_str());
-    let env: [u16; 2] = [0, 0]; // No credentials, user vault paths or ambient environment.
+    // AppContainer startup on Windows uses LOCALAPPDATA to locate its
+    // package profile. An *empty* environment causes CreateProcessW to
+    // fail with ERROR_ENVVAR_NOT_FOUND (203), even when a profile exists.
+    // Explicitly pass only the two trusted OS bootstrap variables, not
+    // PATH, HOME, secrets, or the caller's ambient environment.
+    let mut env = Vec::<u16>::new();
+    for key in ["LOCALAPPDATA", "SystemRoot"] {
+        let value = std::env::var_os(key)
+            .ok_or_else(|| io::Error::other("required Windows bootstrap environment missing"))?;
+        let units: Vec<u16> = value.encode_wide().collect();
+        if units.is_empty() || units.iter().any(|x| *x == 0) {
+            return Err(io::Error::other("invalid Windows bootstrap environment"));
+        }
+        env.extend(OsStr::new(key).encode_wide());
+        env.push(b'=' as u16);
+        env.extend(units);
+        env.push(0);
+    }
+    env.push(0);
+    if env.len() > 32_768 {
+        return Err(io::Error::other("Windows bootstrap environment exceeds limit"));
+    }
     let mut startup = STARTUPINFOEXW::default();
     startup.StartupInfo = STARTUPINFOW::default();
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
