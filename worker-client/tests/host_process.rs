@@ -82,6 +82,12 @@ fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
     std::fs::write(&sentinel, "PRIVATE-VALUE-DO-NOT-EXPOSE").unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    // Positive control: the same host process must be able to connect to
+    // the exact endpoint. Otherwise a blocked-worker result is meaningless.
+    let reachable = std::net::TcpStream::connect(("127.0.0.1", port))
+        .expect("host loopback positive control failed");
+    let (_accepted, _) = listener.accept().unwrap();
+    drop(reachable);
     let config = settings(worker_path());
     let result = windows_denial_probe(&config, &sentinel, &attempted_write, port);
     assert!(result.is_ok(), "native AppContainer/Job deny probe failed: {result:?}");
