@@ -14,7 +14,7 @@ fn settings(worker: PathBuf) -> WorkerSettings {
         timeout: Duration::from_secs(6),
     }
 }
-#[cfg(all(target_os="linux",target_arch="x86_64"))]
+#[cfg(any(all(target_os="linux",target_arch="x86_64"), windows))]
 #[test]
 fn exact_pinned_binary_produces_only_valid_complete_blocks() {
     let cfg = settings(worker_path());
@@ -23,14 +23,14 @@ fn exact_pinned_binary_produces_only_valid_complete_blocks() {
     assert_eq!(verified.extractor.name, "shiva-worker");
     assert!(verified.blocks.iter().any(|b| b.text.contains("Привет")));
 }
-#[cfg(all(target_os="linux",target_arch="x86_64"))]
+#[cfg(any(all(target_os="linux",target_arch="x86_64"), windows))]
 #[test]
 fn binary_hash_mismatch_is_rejected_before_spawn() {
     let mut cfg = settings(worker_path());
     cfg.expected_binary_blake3 = "f".repeat(64);
     assert!(matches!(extract(&cfg, "doc2", "txt", b"test"), Err(ClientError::WorkerHashMismatch)));
 }
-#[cfg(all(target_os="linux",target_arch="x86_64"))]
+#[cfg(any(all(target_os="linux",target_arch="x86_64"), windows))]
 #[test]
 fn document_embedded_path_does_not_get_read_or_indexed() {
     let cfg = settings(worker_path());
@@ -39,7 +39,7 @@ fn document_embedded_path_does_not_get_read_or_indexed() {
         Err(ClientError::FailedExtraction)
     ));
 }
-#[cfg(all(target_os="linux",target_arch="x86_64"))]
+#[cfg(any(all(target_os="linux",target_arch="x86_64"), windows))]
 #[test]
 fn unsupported_pdf_is_not_launched() {
     let cfg = settings(worker_path());
@@ -65,4 +65,28 @@ fn host_deadline_kills_unresponsive_pinned_child() {
     let _ = std::fs::remove_file(&path);
     assert!(matches!(result, Err(ClientError::TimedOut)), "must kill a stalled worker");
     assert!(started.elapsed() < Duration::from_secs(3), "host must not wait for child sleep");
+}
+
+#[cfg(windows)]
+#[test]
+fn appcontainer_denies_real_vault_file_write_network_and_child_process() {
+    use shiva_worker_client::windows_denial_probe;
+    use std::net::TcpListener;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let protected = std::env::temp_dir()
+        .join(format!("shiva-win-protected-{}-{nonce}", std::process::id()));
+    std::fs::create_dir(&protected).unwrap();
+    let sentinel = protected.join("vault-secret.txt");
+    let attempted_write = protected.join("escape-write.txt");
+    std::fs::write(&sentinel, "PRIVATE-VALUE-DO-NOT-EXPOSE").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let config = settings(worker_path());
+    let result = windows_denial_probe(&config, &sentinel, &attempted_write, port);
+    assert!(result.is_ok(), "native AppContainer/Job deny probe failed: {result:?}");
+    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "PRIVATE-VALUE-DO-NOT-EXPOSE");
+    assert!(!attempted_write.exists(), "restricted child wrote outside sandbox");
+    std::fs::remove_file(&sentinel).unwrap();
+    std::fs::remove_dir(&protected).unwrap();
 }
