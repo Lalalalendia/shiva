@@ -342,8 +342,9 @@ fn parse_page(
 #[cfg(test)]
 mod tests {
     use crate::core::*;
-    use crate::pdf::Transformer;
+    use crate::pdf::{Transformer, MAX_DECOMPRESSED_STREAM};
     use crate::{markdown, pdf};
+    use lopdf::LoadOptions;
     use bytes::Bytes;
     use log::{debug, info};
     use std::collections::HashMap;
