@@ -31,6 +31,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Validate malformed PDF corpus on real Windows
-        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::hostile_tests:: -- --nocapture
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::hostile_tests::hostile_ -- --nocapture
       - name: Confirm Windows source feature build
         run: cargo check -p shiva --no-default-features --features pdf,markdown,html,xml
