@@ -1,0 +1,68 @@
+name: Shiva qpdf PDF Structural Rewrite QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/tests/pdf_qpdf_rewrites.rs'
+      - 'scripts/ci/prepare-pdf-qpdf-corpus.py'
+      - 'scripts/ci/fetch-pinned-pdf-corpus.py'
+      - 'scripts/ci/pinned-pdf-corpus-manifest.json'
+      - 'scripts/ci/generate-reportlab-pdf-corpus.py'
+      - 'scripts/ci/reportlab-qa-requirements.txt'
+      - 'scripts/ci/generate-chromium-pdf-corpus.py'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-qpdf-rewrites.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/tests/pdf_qpdf_rewrites.rs'
+      - 'scripts/ci/prepare-pdf-qpdf-corpus.py'
+      - 'scripts/ci/fetch-pinned-pdf-corpus.py'
+      - 'scripts/ci/pinned-pdf-corpus-manifest.json'
+      - 'scripts/ci/generate-reportlab-pdf-corpus.py'
+      - 'scripts/ci/reportlab-qa-requirements.txt'
+      - 'scripts/ci/generate-chromium-pdf-corpus.py'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-qpdf-rewrites.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qpdf-rewrite-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install QA-only qpdf and Poppler from Ubuntu packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qpdf poppler-utils
+          qpdf --version
+          pdftotext -v
+      - name: Install SHA-pinned QA-only ReportLab writer
+        run: |
+          python -m pip install --only-binary=:all: pillow==11.3.0 charset-normalizer==3.4.3
+          python -m pip install --no-deps --only-binary=:all: --require-hashes -r scripts/ci/reportlab-qa-requirements.txt
+          python -m pip check
+      - name: Prepare SHA-verified CC0 and generated ReportLab plus Chrome PDFs
+        run: |
+          python scripts/ci/fetch-pinned-pdf-corpus.py --manifest scripts/ci/pinned-pdf-corpus-manifest.json --out "$RUNNER_TEMP/shiva-cc0"
+          python scripts/ci/generate-reportlab-pdf-corpus.py --out "$RUNNER_TEMP/shiva-reportlab"
+          python scripts/ci/generate-chromium-pdf-corpus.py --out "$RUNNER_TEMP/shiva-chromium" --browser "$(command -v google-chrome)"
+      - name: Apply 21 qpdf structural rewrites and compare Poppler full text
+        run: |
+          python scripts/ci/prepare-pdf-qpdf-corpus.py --pdf-lib "$RUNNER_TEMP/shiva-cc0" --reportlab "$RUNNER_TEMP/shiva-reportlab" --chromium "$RUNNER_TEMP/shiva-chromium" --out "$RUNNER_TEMP/shiva-qpdf"
+      - name: Prove all 105 transformed text pages and full Shiva documents
+        run: |
+          SHIVA_QA_QPDF_DIR="$RUNNER_TEMP/shiva-qpdf" cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_qpdf_rewrites -- --nocapture
