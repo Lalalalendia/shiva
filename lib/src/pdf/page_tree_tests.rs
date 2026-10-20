@@ -196,17 +196,48 @@ fn tree_cycle_via_kids_rejected() -> Result<()> {
 }
 
 #[test]
+fn tree_valid_indirect_kids_array_keeps_page_order() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let kids_array = f.pdf.add_object(Object::Array(vec![
+        f.first.into(), f.second.into(),
+    ]));
+    f.pdf.get_object_mut(f.root)?.as_dict_mut()?.set("Kids", kids_array);
+    assert_eq!(validate_page_tree(&f.pdf)?, vec![f.first, f.second]);
+    let output = format!("{:?}", Transformer::parse(&f.bytes()?)?);
+    assert_eq!(output.matches("TreeFirstUnique").count(), 1);
+    assert_eq!(output.matches("TreeSecondUnique").count(), 1);
+    Ok(())
+}
+
+#[test]
 fn tree_reused_indirect_kids_array_rejected() -> Result<()> {
     let mut f = Fixture::new()?;
     let shared = f.pdf.add_object(Object::Array(vec![f.first.into()]));
-    let other = f.pdf.add_object(dictionary! {
+    // Distinct /Pages branches, both claiming the *same* indirect /Kids
+    // object. This must be rejected even before the second leaf's /Parent
+    // mismatch could conceal the shared-array problem.
+    let first_branch = f.pdf.add_object(dictionary! {
         "Type" => "Pages", "Parent" => f.root,
         "Kids" => shared, "Count" => 1,
     });
-    f.pdf.get_object_mut(f.root)?.as_dict_mut()?
-        .set("Kids", vec![other.into(), other.into()]);
-    // Must never loop forever or return an apparently complete page set.
-    f.verify_rejected("page-tree")
+    let second_branch = f.pdf.add_object(dictionary! {
+        "Type" => "Pages", "Parent" => f.root,
+        "Kids" => shared, "Count" => 1,
+    });
+    f.pdf.get_object_mut(f.first)?.as_dict_mut()?.set("Parent", first_branch);
+    f.pdf.get_object_mut(f.root)?.as_dict_mut()?.set("Kids", vec![
+        first_branch.into(), second_branch.into(),
+    ]);
+    f.verify_rejected("indirect array is cyclic or shared")
+}
+
+#[test]
+fn tree_indirect_kids_self_reference_rejected() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let indirect = f.pdf.new_object_id();
+    f.pdf.objects.insert(indirect, Object::Reference(indirect));
+    f.pdf.get_object_mut(f.root)?.as_dict_mut()?.set("Kids", indirect);
+    f.verify_rejected("indirect array is cyclic or shared")
 }
 
 #[test]
