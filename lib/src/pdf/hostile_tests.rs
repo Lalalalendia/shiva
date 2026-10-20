@@ -120,6 +120,27 @@ fn hostile_control_valid_pdf_remains_indexable() -> anyhow::Result<()> {
 }
 
 #[test]
+fn hostile_control_empty_filter_list_preserves_valid_text() -> anyhow::Result<()> {
+    // An empty /Filter array is a valid uncompressed stream declaration.
+    // Rejecting corrupt streams must not erase the text of valid PDFs.
+    let bytes = fixture(
+        FixtureFont::Type1,
+        latin_ops(vec![Object::string_literal("EmptyFilterStillText")]),
+        false,
+    )?;
+    let mut pdf = LopdfDocument::load_mem(&bytes)?;
+    let page_id = *pdf.get_pages().values().next().unwrap();
+    let contents_id = *pdf.get_page_contents(page_id).first().unwrap();
+    let stream = pdf.get_object_mut(contents_id)?.as_stream_mut()?;
+    stream.dict.set("Filter", Object::Array(vec![]));
+    let mut reserialized = Vec::new();
+    pdf.save_to(&mut reserialized)?;
+    let parsed = Transformer::parse(&Bytes::from(reserialized))?;
+    assert_eq!(format!("{parsed:?}").matches("EmptyFilterStillText").count(), 1);
+    Ok(())
+}
+
+#[test]
 fn hostile_cmap_invalid_bfrange_fails_closed() -> anyhow::Result<()> {
     // An inverted bf-range must not be accepted as a trustworthy mapping.
     let cmap = BASE_CMAP.replace(
