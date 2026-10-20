@@ -27,6 +27,13 @@ description = "Shiva library: Implementation in Rust of a parser and generator f
 exclude = ["fonts", "test"]
 
 
+# This synthetic resource probe must never be built by non-PDF
+# consumers (including the production text-only Shiva worker).
+[[example]]
+name = "pdf_resource_probe"
+path = "examples/pdf_resource_probe.rs"
+required-features = ["pdf"]
+
 [package.metadata.docs.rs]
 features = ["text", "markdown", "html", "pdf", "json", "xml", "csv", "docx", "xlsx", "xls", "ods"]
 
