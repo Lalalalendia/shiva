@@ -34,13 +34,10 @@ impl TransformerTrait for Transformer {
             document,
             LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
         )?;
-        anyhow::ensure!(
-            pdf_document.get_pages().len() <= MAX_PDF_PAGES,
-            "PDF page count exceeds standalone parser limit"
-        );
-        for (_page_number, page_id) in pdf_document.get_pages() {
-            // get_page_content() already joins the page's /Contents streams.
-            // Parsing it once PER stream repeats every page's text N times.
+        // A lenient get_pages() traversal can skip corrupt subtrees silently.
+        // Validate the exact graph once and extract only this ordered snapshot.
+        let verified_pages = page_tree::validate_page_tree(&pdf_document)?;
+        for page_id in verified_pages {
             parse_page(page_id, &pdf_document, &mut elements, &mut budget)?;
         }
         Ok(Document::new(elements))
@@ -908,3 +905,9 @@ end"#;
 // Security QA uses deterministic malformed PDFs kept out of release code.
 #[cfg(test)]
 mod hostile_tests;
+
+// Extraction requires all leaves to be validated before any page is read.
+mod page_tree;
+
+#[cfg(test)]
+mod page_tree_tests;
