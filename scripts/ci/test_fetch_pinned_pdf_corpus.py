@@ -10,7 +10,7 @@ assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
-PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n"
+PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n" + b" " * 100 + b"%%EOF\n"
 
 
 def record(blob):
@@ -47,19 +47,19 @@ class PinnedPdfIntegrityTests(unittest.TestCase):
     def test_manifest_fails_without_sha256(self):
         r = record(PDF)
         del r["sha256"]
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "SHA-1/SHA-256"):
             module.validate_manifest(self._manifest(r))
 
     def test_manifest_rejects_traversal(self):
         r = record(PDF)
         r["name"] = "../sample.pdf"
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "invalid or duplicate"):
             module.validate_manifest(self._manifest(r))
 
     def test_manifest_rejects_wrong_upstream(self):
         manifest = self._manifest(record(PDF))
         manifest["origin"]["repository"] = "untrusted/repository"
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "unexpected fixture source"):
             module.validate_manifest(manifest)
 
     @staticmethod
