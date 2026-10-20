@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "origin": {
+    "repository": "tinytoolkit-org/pdf-sample-files",
+    "commit": "4fd733c47ead5446b06372ab910cb78d1c7da55e",
+    "license": "CC0-1.0",
+    "generator": "pdf-lib / @cantoo/pdf-lib"
+  },
+  "fixtures": [
+    {
+      "name": "sample-1-page.pdf",
+      "bytes": 3312,
+      "git_blob_sha1": "ddab89a772c7727cfab3d50f094a41a6950292cd",
+      "oracle": "exact-page-text",
+      "pages": 1
+    },
+    {
+      "name": "sample-10-pages.pdf",
+      "bytes": 20337,
+      "git_blob_sha1": "cd24d9ed7c7ac203712c7aa2f21ab85e5d9c3d5f",
+      "oracle": "exact-page-text",
+      "pages": 10
+    },
+    {
+      "name": "sample-100-pages.pdf",
+      "bytes": 190765,
+      "git_blob_sha1": "24fc67c23f928bc6743ba1ef9f820e8412ede61d",
+      "oracle": "exact-page-text",
+      "pages": 100
+    },
+    {
+      "name": "sample-blank-a4.pdf",
+      "bytes": 1348,
+      "git_blob_sha1": "5cb2352123c841e11a4882676e8b8641c568c3fe",
+      "oracle": "empty-text-layer",
+      "pages": 1
+    },
+    {
+      "name": "sample-scanned.pdf",
+      "bytes": 432160,
+      "git_blob_sha1": "be086b3e2a18235a2d72c3b70a2ecd2733ad148f",
+      "oracle": "needs-ocr",
+      "pages": 3
+    },
+    {
+      "name": "sample-corrupted.pdf",
+      "bytes": 7062,
+      "git_blob_sha1": "0d0807c30a1310f7d7ab6dca08776ceb2e345fca",
+      "oracle": "reject"
+    },
+    {
+      "name": "sample-password-protected.pdf",
+      "bytes": 7618,
+      "git_blob_sha1": "acbb6ca2491ee5840755ed1b1b02de8b2cbd5c11",
+      "oracle": "reject-without-password"
+    }
+  ]
+}
