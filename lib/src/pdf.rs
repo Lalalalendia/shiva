@@ -14,12 +14,10 @@ impl TransformerTrait for Transformer {
     fn parse(document: &Bytes) -> anyhow::Result<Document> {
         let mut elements: Vec<Element> = Vec::new();
         let pdf_document = PdfDocument::load_mem(document)?;
-        for (_id, page_id) in pdf_document.get_pages() {
-            let objects = pdf_document.get_page_contents(page_id);
-            for object_id in objects {
-                let object = pdf_document.get_object(object_id)?;
-                parse_object(page_id, &pdf_document, object, &mut elements)?;
-            }
+        for (_page_number, page_id) in pdf_document.get_pages() {
+            // get_page_content() already joins the page's /Contents streams.
+            // Parsing it once PER stream repeats every page's text N times.
+            parse_page(page_id, &pdf_document, &mut elements)?;
         }
         Ok(Document::new(elements))
     }
@@ -60,10 +58,9 @@ impl TransformerTrait for Transformer {
     }
 }
 
-fn parse_object(
+fn parse_page(
     page_id: ObjectId,
     pdf_document: &PdfDocument,
-    _object: &Object,
     elements: &mut Vec<Element>,
 ) -> anyhow::Result<()> {
     fn collect_text(
@@ -361,6 +358,67 @@ mod tests {
         assert!(generated_result.is_ok());
         std::fs::write("test/data/typst.pdf", generated_result.unwrap())?;
 
+        Ok(())
+    }
+
+
+    /// Regression: a PDF page with two /Contents streams is ONE logical
+    /// page. Each stream must appear exactly once in extracted text.
+    /// Previously the outer loop called get_page_content() once per stream,
+    /// duplicating both stream texts.
+    #[test]
+    fn multi_stream_page_does_not_duplicate_extracted_text() -> anyhow::Result<()> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        fn text_stream(value: &str) -> anyhow::Result<Stream> {
+            let operations = vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                Operation::new("Tj", vec![Object::string_literal(value)]),
+                Operation::new("ET", vec![]),
+            ];
+            Ok(Stream::new(dictionary! {}, Content { operations }.encode()?))
+        }
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let font_id = pdf.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources_id = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let first_id = pdf.add_object(text_stream("AlphaUnique")?);
+        let second_id = pdf.add_object(text_stream("BetaUnique")?);
+        let page_id = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => vec![first_id.into(), second_id.into()],
+            "Resources" => resources_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }));
+        let catalog_id = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog_id);
+        assert_eq!(pdf.get_page_contents(page_id).len(), 2);
+
+        let mut output = Vec::new();
+        pdf.save_to(&mut output)?;
+        let parsed = Transformer::parse(&Bytes::from(output))?;
+        // Debug only for test assertions: no input text is logged by worker.
+        let flattened = format!("{parsed:?}");
+        assert_eq!(flattened.matches("AlphaUnique").count(), 1, "{flattened}");
+        assert_eq!(flattened.matches("BetaUnique").count(), 1, "{flattened}");
         Ok(())
     }
 
