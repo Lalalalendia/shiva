@@ -14,6 +14,7 @@ This is a security regression **experiment for the standalone Shiva PDF library*
 | Case | Expected parser behavior | Purpose |
 | --- | --- | --- |
 | Valid Type1 baseline | A single exact token | Test that valid fixtures work |
+| Valid PDF with empty `/Filter` list | Exact text retained | A strict decoder must not reject legal uncompressed streams |
 | Type0 ToUnicode inverted bfrange | Error, not Complete | Reject invalid CID source ranges |
 | Flate-compressed CMap above decoded 1 MiB | Error, not Complete | Enforce CMap decompression bound |
 | 17+-deep nested text arrays | Explicit nesting-budget error | Stop recursion bombs |
