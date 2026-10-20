@@ -123,12 +123,13 @@ impl TransformerTrait for Transformer {
             for c in &doc_element.children {
                 match c {
                     docx_rs::ParagraphChild::Run(run) => {
-                        if run.children.is_empty() {
-                            result.push_str("");
-                            return result;
-                        }
-                        if let RunChild::Text(t) = &run.children[0] {
-                            result.push_str(&t.text);
+                        // A single w:r may hold multiple w:t nodes (and
+                        // non-text children). Do not drop later text nodes or
+                        // stop at an empty run before subsequent valid runs.
+                        for child in &run.children {
+                            if let RunChild::Text(t) = child {
+                                result.push_str(&t.text);
+                            }
                         }
                     }
                     _ => {}
@@ -541,6 +542,60 @@ mod tests {
         info!("--->>>{:<12} - start writing document_from_md.docx", "TEST");
         std::fs::write("test/data/document_from_md.docx", generated_result)?;
 
+        Ok(())
+    }
+
+
+    /// Reproduce the content-loss bug: multiple text nodes in a single run,
+    /// followed by an empty run, must not truncate either the run or paragraph.
+    #[test]
+    fn text_run_segments_and_empty_run_preserve_unicode() -> anyhow::Result<()> {
+        let multi_segment = Run::new()
+            .add_text("Начало ")
+            .add_text("главы 世界");
+        assert_eq!(
+            multi_segment.children.iter()
+                .filter(|node| matches!(node, RunChild::Text(_))).count(),
+            2,
+            "fixture must contain two distinct w:t children in one w:r"
+        );
+        let paragraph = Paragraph::new()
+            .style("Normal")
+            .add_run(multi_segment)
+            .add_run(Run::new())
+            .add_run(Run::new().add_text(" завершено."));
+        let mut cursor = Cursor::new(Vec::new());
+        Docx::new().add_paragraph(paragraph).build().pack(&mut cursor)?;
+        let parsed = Transformer::parse(&Bytes::from(cursor.into_inner()))?;
+        assert_eq!(
+            Document::new(vec![Element::Text {
+                text: "Начало главы 世界 завершено.".to_owned(),
+                size: 16,
+            }]),
+            parsed,
+            "all w:t nodes and later runs must survive parser normalization"
+        );
+        Ok(())
+    }
+
+    /// Separate runs should retain their original logical order and Unicode.
+    #[test]
+    fn text_multiple_runs_do_not_drop_following_text() -> anyhow::Result<()> {
+        let paragraph = Paragraph::new()
+            .style("Normal")
+            .add_run(Run::new().add_text("Альфа "))
+            .add_run(Run::new().add_text("βета "))
+            .add_run(Run::new().add_text("中文"));
+        let mut cursor = Cursor::new(Vec::new());
+        Docx::new().add_paragraph(paragraph).build().pack(&mut cursor)?;
+        let parsed = Transformer::parse(&Bytes::from(cursor.into_inner()))?;
+        assert_eq!(
+            Document::new(vec![Element::Text {
+                text: "Альфа βета 中文".to_owned(),
+                size: 16,
+            }]),
+            parsed
+        );
         Ok(())
     }
 
