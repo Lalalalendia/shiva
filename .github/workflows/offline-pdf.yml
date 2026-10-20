@@ -44,6 +44,8 @@ jobs:
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::cid_page_decompression_budget_fails_closed -- --nocapture
       - name: Prove PDF cumulative decoded-page and text budgets with linear Tm corpus
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::total_budget_ -- --nocapture
+      - name: Reject synthetic malformed PDF /Contents, CMap, deep arrays and unknown fonts
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::hostile_tests::hostile_ -- --nocapture
       - name: Generate a minimal real PDF with provisioned local fonts
         env:
           SHIVA_FONT_DIR: ${{ github.workspace }}/lib/fonts

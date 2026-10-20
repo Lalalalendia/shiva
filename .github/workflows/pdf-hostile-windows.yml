@@ -1,0 +1,36 @@
+name: Shiva PDF hostile structure Windows QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/hostile_tests.rs'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-hostile-windows.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/hostile_tests.rs'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-hostile-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-malformed-pdf:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Validate malformed PDF corpus on real Windows
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::hostile_tests::hostile_ -- --nocapture
+      - name: Confirm Windows source feature build
+        run: cargo check -p shiva --no-default-features --features pdf,markdown,html,xml

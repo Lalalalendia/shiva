@@ -47,6 +47,8 @@ regex = { version = "1.10.3", optional = true }
 scraper = { version = "0.19.0", optional = true }
 ego-tree = { version = "0.6.2", optional = true }
 lopdf = { version = "=0.45.0", default-features = false, optional = true }
+# Strictly validate single-layer FlateDecode checksums and EOF before trusting lopdf output.
+flate2 = { version = "1", optional = true }
 serde_json = { version = "1.0.116", optional = true }
 serde = { version = "1.0.198", features = ["derive"], optional = true }
 serde-xml-rs = { version = "0.6.0", optional = true }
@@ -93,7 +95,7 @@ text = []
 csv = ["dep:csv"]
 markdown = ["regex", "pulldown-cmark", "comrak"]
 html = ["scraper", "ego-tree"]
-pdf = ["lopdf", "typst", "ttf-parser", "comemo", "time", "typst-pdf"]
+pdf = ["lopdf", "flate2", "typst", "ttf-parser", "comemo", "time", "typst-pdf"]
 json = ["serde", "serde_json", "base64"]
 xml = ["serde", "serde-xml-rs", "quick-xml"]
 rtf = ["rtf-parser", "image"]

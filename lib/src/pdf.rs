@@ -8,6 +8,7 @@ use lopdf::content::Content;
 use lopdf::Encoding;
 use lopdf::{Document as PdfDocument, LoadOptions, Object, ObjectId};
 use std::collections::BTreeMap;
+use std::io::Read;
 use typst::{eval::Tracer, foundations::Smart};
 
 pub struct Transformer;
@@ -126,6 +127,79 @@ impl PdfBudget {
     }
 }
 
+/// Bounded checksum/EOF validation for ordinary single-filter zlib PDF
+/// streams. lopdf 0.45 logs zlib errors and can return truncated/empty data
+/// as Ok(Vec), which violates the Complete-or-error indexing boundary.
+fn validate_flate_integrity(raw: &[u8], max_output: usize) -> anyhow::Result<()> {
+    let mut decoder = flate2::bufread::ZlibDecoder::new(raw);
+    let mut sink = Vec::new();
+    let cap = (max_output as u64).saturating_add(1);
+    (&mut decoder).take(cap).read_to_end(&mut sink)?;
+    anyhow::ensure!(
+        sink.len() <= max_output,
+        "PDF FlateDecode output budget exceeded"
+    );
+    anyhow::ensure!(
+        decoder.get_ref().is_empty(),
+        "PDF FlateDecode has trailing bytes after compressed stream"
+    );
+    Ok(())
+}
+
+/// lopdf's convenience method silently skips dangling /Contents references
+/// and may use compressed bytes as fallback when decoding fails. A security
+/// extractor must never turn those cases into an empty or corrupted index.
+fn checked_page_content(pdf: &PdfDocument, page_id: ObjectId) -> anyhow::Result<Vec<u8>> {
+    let page_dict = pdf.get_dictionary(page_id)?;
+    let content_ids = pdf.get_page_contents(page_id);
+    match page_dict.get(b"Contents") {
+        Err(_) => return Ok(Vec::new()), // A genuinely blank page is valid.
+        Ok(Object::Array(items)) => {
+            anyhow::ensure!(
+                items.iter().all(|item| matches!(item, Object::Reference(_)))
+                    && items.len() == content_ids.len(),
+                "PDF /Contents array contains unsupported or missing references"
+            );
+        }
+        Ok(Object::Reference(_)) => {
+            anyhow::ensure!(
+                !content_ids.is_empty(),
+                "PDF /Contents reference cannot be resolved"
+            );
+        }
+        Ok(_) => anyhow::bail!("PDF /Contents must be an indirect stream or an array"),
+    }
+
+    let mut page_content = Vec::new();
+    for id in content_ids {
+        let stream = pdf.get_object(id)?.as_stream()?;
+        // A malformed /Filter value is not permission to parse raw bytes.
+        let filters = if stream.dict.get(b"Filter").is_ok() {
+            stream.filters()?
+        } else {
+            Vec::new()
+        };
+        let remaining = MAX_DECOMPRESSED_STREAM
+            .checked_sub(page_content.len())
+            .ok_or_else(|| anyhow::anyhow!("PDF decoded page byte budget exceeded"))?;
+        anyhow::ensure!(remaining > 0, "PDF decoded page byte budget exceeded");
+        // Reserve one byte for the newline separator between page streams.
+        // lopdf can return Ok(empty) after logging a Flate checksum error;
+        // explicitly require a valid zlib EOF before using its output.
+        if filters.len() == 1 && filters[0] == b"FlateDecode" {
+            validate_flate_integrity(&stream.content, remaining - 1)?;
+        }
+        let decoded = stream.get_plain_content_with_limit(remaining - 1)?;
+        anyhow::ensure!(
+            decoded.len() < remaining,
+            "PDF decoded page byte budget exceeded"
+        );
+        page_content.extend_from_slice(&decoded);
+        page_content.push(b'\n');
+    }
+    Ok(page_content)
+}
+
 fn parse_page(
     page_id: ObjectId,
     pdf_document: &PdfDocument,
@@ -221,7 +295,7 @@ fn parse_page(
         encodings.insert(name, encoding);
     }
 
-    let page = pdf_document.get_page_content_with_limit(page_id, MAX_DECOMPRESSED_STREAM)?;
+    let page = checked_page_content(pdf_document, page_id)?;
     budget.page_content(page.len())?;
     let content = Content::decode(&page)?;
     budget.operations(content.operations.len())?;
@@ -830,3 +904,7 @@ end"#;
         std::fs::write("test/data/test.pdf", output_bytes).unwrap();
     }
 }
+
+// Security QA uses deterministic malformed PDFs kept out of release code.
+#[cfg(test)]
+mod hostile_tests;
