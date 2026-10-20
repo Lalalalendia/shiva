@@ -550,13 +550,18 @@ mod tests {
     /// followed by an empty run, must not truncate either the run or paragraph.
     #[test]
     fn text_run_segments_and_empty_run_preserve_unicode() -> anyhow::Result<()> {
+        let multi_segment = Run::new()
+            .add_text("Начало ")
+            .add_text("главы 世界");
+        assert_eq!(
+            multi_segment.children.iter()
+                .filter(|node| matches!(node, RunChild::Text(_))).count(),
+            2,
+            "fixture must contain two distinct w:t children in one w:r"
+        );
         let paragraph = Paragraph::new()
             .style("Normal")
-            .add_run(
-                Run::new()
-                    .add_text("Начало ")
-                    .add_text("главы 世界")
-            )
+            .add_run(multi_segment)
             .add_run(Run::new())
             .add_run(Run::new().add_text(" завершено."));
         let mut cursor = Cursor::new(Vec::new());
