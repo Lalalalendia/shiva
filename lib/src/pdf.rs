@@ -284,7 +284,10 @@ fn parse_page(
 #[cfg(test)]
 mod tests {
     use crate::core::*;
-    use crate::pdf::{Transformer, MAX_DECOMPRESSED_STREAM};
+    use crate::pdf::{
+        PdfBudget, Transformer, MAX_DECOMPRESSED_STREAM, MAX_PDF_EMITTED_ELEMENTS,
+        MAX_PDF_TOTAL_PAGE_CONTENT, MAX_PDF_TOTAL_TEXT,
+    };
     use crate::{markdown, pdf};
     use lopdf::LoadOptions;
     use bytes::Bytes;
@@ -583,6 +586,122 @@ end"#;
             Transformer::parse(&Bytes::from(output)).is_err(),
             "Shiva must reject an oversized decoded PDF page"
         );
+        Ok(())
+    }
+
+
+    #[test]
+    fn total_budget_counters_reject_overflow_without_wraparound() -> anyhow::Result<()> {
+        let mut budget = PdfBudget::default();
+        budget.text(MAX_PDF_TOTAL_TEXT)?;
+        assert!(budget.text(1).is_err(), "text ceiling must be enforced");
+        let mut budget = PdfBudget::default();
+        budget.page_content(MAX_PDF_TOTAL_PAGE_CONTENT)?;
+        assert!(budget.page_content(1).is_err(), "global page ceiling must be enforced");
+        let mut budget = PdfBudget::default();
+        budget.elements(MAX_PDF_EMITTED_ELEMENTS)?;
+        assert!(budget.elements(1).is_err(), "element count must be enforced");
+        let mut budget = PdfBudget::default();
+        assert!(budget.text(usize::MAX).is_err(), "counter wraparound must fail");
+        Ok(())
+    }
+
+    #[test]
+    fn total_budget_rejects_five_individually_valid_compressed_pages() -> anyhow::Result<()> {
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        const PAGE_DECODED_BYTES: usize = 4 * 1024 * 1024 + 64;
+        assert!(PAGE_DECODED_BYTES < MAX_DECOMPRESSED_STREAM);
+        assert!(5 * PAGE_DECODED_BYTES > MAX_PDF_TOTAL_PAGE_CONTENT);
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let mut page_ids = Vec::new();
+        for _ in 0..5 {
+            let mut page_stream = Stream::new(
+                dictionary! {}, vec![b' '; PAGE_DECODED_BYTES],
+            );
+            page_stream.compress()?;
+            let stream_id = pdf.add_object(page_stream);
+            let page_id = pdf.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => stream_id,
+                "Resources" => dictionary! {},
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+            "Count" => page_ids.len() as i64,
+        }));
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)?;
+        assert!(bytes.len() < 1_000_000, "compressed test fixture unexpectedly large");
+        let err = Transformer::parse(&Bytes::from(bytes))
+            .expect_err("individually legal pages must exceed combined decode budget");
+        assert!(
+            err.to_string().contains("cumulative decoded page budget"),
+            "aggregate budget error expected: {err}"
+        );
+        Ok(())
+    }
+
+    /// Repeated text matrix operators must append in source order without
+    /// cloning all preceding paragraph children at every step.
+    #[test]
+    fn total_budget_many_tm_operations_keep_order() -> anyhow::Result<()> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font },
+        });
+        let mut ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+        ];
+        for i in 0..1500 {
+            ops.push(Operation::new(
+                "Tj", vec![Object::string_literal(format!("TM_{i:04}_MARKER"))],
+            ));
+            ops.push(Operation::new("Tm", vec![]));
+        }
+        ops.push(Operation::new("ET", vec![]));
+        let content = Content { operations: ops };
+        let stream_id = pdf.add_object(Stream::new(dictionary! {}, content.encode()?));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => resources,
+            "Contents" => stream_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        }));
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)?;
+        let result = Transformer::parse(&Bytes::from(bytes))?;
+        let debug_output = format!("{result:?}");
+        assert_eq!(debug_output.matches("_MARKER").count(), 1500);
+        assert!(debug_output.find("TM_0000_MARKER").unwrap()
+            < debug_output.find("TM_1499_MARKER").unwrap());
         Ok(())
     }
 
