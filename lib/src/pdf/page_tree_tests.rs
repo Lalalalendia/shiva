@@ -237,7 +237,9 @@ fn tree_indirect_kids_self_reference_rejected() -> Result<()> {
     let indirect = f.pdf.new_object_id();
     f.pdf.objects.insert(indirect, Object::Reference(indirect));
     f.pdf.get_object_mut(f.root)?.as_dict_mut()?.set("Kids", indirect);
-    f.verify_rejected("indirect array is cyclic or shared")
+    // lopdf's object reader itself may identify the self-reference
+    // before the Shiva validator runs. Either way the parse must fail closed.
+    f.verify_rejected("cycle")
 }
 
 #[test]
