@@ -105,7 +105,7 @@ fn parse_with_oracle(bytes: Vec<u8>, seed: &Seed, mutation: &str) -> bool {
     }
 }
 
-fn positions(data: &[u8], token: &[u8]) -> impl Iterator<Item = usize> + '_ {
+fn positions<'a>(data: &'a [u8], token: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
     data.windows(token.len())
         .enumerate()
         .filter(move |(_, slice)| *slice == token)
