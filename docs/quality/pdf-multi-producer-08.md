@@ -20,7 +20,7 @@ The fixed generator `scripts/ci/generate-reportlab-pdf-corpus.py` does not read 
 
 Total **16 text pages**, each with exact expected marker cardinality and global order. No oracle relies only on a successful exit or `lopdf::get_pages()` length; the latter is used solely to sanity-check the rotation fixture, while Shiva's own strict validator is used for extraction.
 
-An automated run on the local sandbox using **ReportLab 4.4.9** and `pdftotext` confirmed all 16 markers after fixing a previously off-page placement bug. The actual acceptance version is **4.4.10** and must pass separate GitHub Actions Linux 24.04 and Windows 2022 jobs.
+An automated run on the local sandbox using **ReportLab 4.4.9** and `pdftotext` confirmed all 16 markers after fixing a previously off-page placement bug. Actual **ReportLab 4.4.10** CI succeeded on native Linux and Windows, yielding **exactly the same SHA-256** for all 3 profiles: `f7aa5fdd...` (1 page), `0cccac77...` (12 pages), `6a935e0e...` (3 rotated). These three **full 64-character hashes are now enforced** by the generator source itself; any file drift fails before Rust parsing. Fresh exact-HEAD CI after the fingerprint freeze remains required.
 
 ## Acceptance and release boundaries
 
