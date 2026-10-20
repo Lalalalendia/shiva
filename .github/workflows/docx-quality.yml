@@ -1,0 +1,31 @@
+name: Shiva DOCX text fidelity
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/docx.rs'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/docx-quality.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/docx.rs'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/docx-quality.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docx-text-runs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: DOCX full textual run corpus (minimal dependencies)
+        run: cargo test -p shiva --no-default-features --features docx,markdown,html,xml --lib docx::tests::text_ -- --nocapture
+      - name: Check bounded feature-set compilation
+        run: cargo check -p shiva --no-default-features --features docx,markdown,html,xml
