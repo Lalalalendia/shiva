@@ -9,6 +9,7 @@ on:
       - 'Cargo.toml'
       - '.github/workflows/worker-windows.yml'
       - 'docs/architecture/windows-shiva-worker-v1.md'
+      - 'scripts/ci/windows-protected-worker-fixture.ps1'
   push:
     branches: [main]
     paths:
@@ -17,6 +18,7 @@ on:
       - 'extractor-protocol/**'
       - '.github/workflows/worker-windows.yml'
       - 'docs/architecture/windows-shiva-worker-v1.md'
+      - 'scripts/ci/windows-protected-worker-fixture.ps1'
   workflow_dispatch:
 
 permissions:
@@ -67,6 +69,7 @@ jobs:
           '@
           $sid = [ShivaLpacTestSid]::Resolve("AkulaShivaWorkerNoNetworkV1")
           if ($sid -notmatch '^S-1-15-2-') { throw "Unexpected AppContainer SID" }
+          "SHIVA_TEST_PROFILE_SID=$sid" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           $exe = Join-Path $env:GITHUB_WORKSPACE "target\debug\shiva-worker.exe"
           if (!(Test-Path -LiteralPath $exe)) { throw "Worker binary missing" }
           $grant = "*$($sid):(RX)"
@@ -109,6 +112,8 @@ jobs:
         run: cargo test -p shiva-worker-client --test worker_image_path -- --nocapture
       - name: Windows pinned executable FileId unit negatives
         run: cargo test -p shiva-worker-client --lib -- --nocapture
+      - name: Protected Program Files worker ACL and LPAC fixture (hosted CI only)
+        run: ./scripts/ci/windows-protected-worker-fixture.ps1
       - name: Win32 Worker unit / protocol check
         run: cargo test -p shiva-worker --lib
       - name: Compile native runner and guard

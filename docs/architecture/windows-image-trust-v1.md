@@ -77,3 +77,39 @@ package can satisfy the production gate. Do not describe IMAGE-02 as a full
 TOCTOU fix.
 
 Source: https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
+
+
+## IMAGE-03a: protected-root feasibility on hosted Windows CI only
+
+A separate native Windows CI step, after the ordinary LPAC acceptance suite,
+copies the already-built `shiva-worker.exe` into a unique temporary fixture
+under `%ProgramFiles%` on an ephemeral GitHub-hosted Windows runner.
+It disables inherited ACLs at the fixture root and executable, explicitly
+allows only Local System, Administrators and the **exact** worker AppContainer
+SID (read/execute). The script structurally audits these allow ACEs and
+refuses mutation permissions on the exact profile SID. It compares source and
+copied SHA-256, then runs the existing real host+LPAC negative and junction
+E2E from the protected image location. It prints
+`SHIVA_WIN_PROTECTED_ROOT_CI=pass` only when both succeed.
+
+This fixture deliberately does **not** change the real Akula installer,
+any vault ACL, any user's installed application, or Shiva's runtime
+permissions. It is constrained to `RUNNER_ENVIRONMENT=github-hosted`,
+`RUNNER_OS=Windows`, and a unique CI-run ID path. Cleanup is attempted
+in a `finally` block.
+
+**Evidence limit:** ACL inspection by an administrator CI user is not the
+same as a negative execution from an independently authenticated non-admin
+Windows account. It does not establish signer provenance or protected
+updates on Windows 10/11. Akula's current per-user NSIS still installs its
+GUI in `%LOCALAPPDATA%\\Akula`, without a protected Shiva worker.
+Treat this stage as a feasibility test for a *separate* trusted worker
+deployment, not installer acceptance. Required follow-ups remain a
+real signed package, verified file/root owner and effective non-admin
+write/rename/reparse denial, pinned Authenticode publisher and installed
+Windows 10/11 acceptance.
+
+Packaging evidence:
+- https://github.com/Lalalalendia/Akula/blob/main/.github/workflows/windows-beta.yml
+- https://github.com/Lalalalendia/Akula/blob/main/scripts/test-windows-beta.ps1
+- https://github.com/Lalalalendia/Akula/blob/main/aquilum-app/native/packaging/akula-windows.json
