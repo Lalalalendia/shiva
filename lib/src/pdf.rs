@@ -5,15 +5,38 @@ use anyhow;
 use bytes::Bytes;
 use log::{debug, warn};
 use lopdf::content::Content;
-use lopdf::{Document as PdfDocument, Object, ObjectId};
+use lopdf::encodings::Encoding;
+use lopdf::{Document as PdfDocument, LoadOptions, Object, ObjectId};
 use std::collections::BTreeMap;
 use typst::{eval::Tracer, foundations::Smart};
 
 pub struct Transformer;
+
+// Standalone library QA limits, not permission to enable PDF in the worker.
+// These bounds cover the input file, eager load-time stream decoding,
+// individual fonts' CMaps and each page's combined uncompressed content.
+// Process CPU, total allocations and document output budgets still need a
+// separate sandbox gate before any Akula integration.
+const MAX_PDF_INPUT: usize = 64 * 1024 * 1024;
+const MAX_DECOMPRESSED_STREAM: usize = 8 * 1024 * 1024;
+const MAX_TOUNICODE_CMAP: usize = 1024 * 1024;
+const MAX_PDF_PAGES: usize = 1024;
+
 impl TransformerTrait for Transformer {
     fn parse(document: &Bytes) -> anyhow::Result<Document> {
         let mut elements: Vec<Element> = Vec::new();
-        let pdf_document = PdfDocument::load_mem(document)?;
+        anyhow::ensure!(
+            document.len() <= MAX_PDF_INPUT,
+            "PDF input exceeds standalone parser byte limit"
+        );
+        let pdf_document = PdfDocument::load_mem_with_options(
+            document,
+            LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
+        )?;
+        anyhow::ensure!(
+            pdf_document.get_pages().len() <= MAX_PDF_PAGES,
+            "PDF page count exceeds standalone parser limit"
+        );
         for (_page_number, page_id) in pdf_document.get_pages() {
             // get_page_content() already joins the page's /Contents streams.
             // Parsing it once PER stream repeats every page's text N times.
@@ -65,7 +88,7 @@ fn parse_page(
 ) -> anyhow::Result<()> {
     fn collect_text(
         text: &mut String,
-        encoding: Option<&str>,
+        encoding: &Encoding<'_>,
         operands: &[Object],
         elements: &mut Vec<Element>,
     ) -> anyhow::Result<()> {
@@ -73,7 +96,13 @@ fn parse_page(
             debug!("2 {:?}", operand);
             match *operand {
                 Object::String(ref bytes, _) => {
-                    let decoded_text = PdfDocument::decode_text(encoding, bytes);
+                    let decoded_text = PdfDocument::decode_text(encoding, bytes)?;
+                    // A missing CID code would otherwise become U+FFFD and
+                    // risk publishing corrupted tokens as "Complete" text.
+                    anyhow::ensure!(
+                        !decoded_text.contains('\u{FFFD}'),
+                        "PDF glyph could not be mapped to Unicode"
+                    );
                     text.push_str(&decoded_text);
                     if bytes.len() == 1 && bytes[0] == 1 {
                         match elements.last() {
@@ -150,7 +179,7 @@ fn parse_page(
                     }
                 }
                 Object::Array(ref arr) => {
-                    let _ = collect_text(text, encoding, arr, elements);
+                    collect_text(text, encoding, arr, elements)?;
                     text.push(' ');
                 }
                 Object::Integer(i) => {
@@ -165,13 +194,30 @@ fn parse_page(
     }
     let mut text = String::new();
 
-    let fonts = pdf_document.get_page_fonts(page_id);
-    let encodings = fonts
-        .into_iter()
-        .map(|(name, font)| (name, font.get_font_encoding()))
-        .collect::<BTreeMap<Vec<u8>, &str>>();
+    let fonts = pdf_document.get_page_fonts(page_id)?;
+    let mut encodings = BTreeMap::new();
+    for (name, font) in fonts {
+        // Don't silently fall back to a Latin single-byte encoding for
+        // composite CID fonts. They require a real ToUnicode CMap.
+        let composite = font.get(b"Subtype")
+            .and_then(Object::as_name)
+            .map(|name| name == b"Type0")
+            .unwrap_or(false);
+        let encoding = font.get_font_encoding_with_limit(
+            pdf_document, MAX_TOUNICODE_CMAP,
+        )?;
+        anyhow::ensure!(
+            !composite || matches!(encoding, Encoding::UnicodeMapEncoding(_)),
+            "composite PDF font has no usable ToUnicode mapping"
+        );
+        encodings.insert(name, encoding);
+    }
 
-    let vec = pdf_document.get_page_content(page_id)?;
+    // The bounded variant is essential: page /Contents can include many
+    // individually compressed streams, each contributing to decompression.
+    let vec = pdf_document.get_page_content_with_limit(
+        page_id, MAX_DECOMPRESSED_STREAM,
+    )?;
     let content = Content::decode(&vec)?;
     let mut current_encoding = None;
     for operation in &content.operations {
@@ -217,10 +263,15 @@ fn parse_page(
                     .first()
                     .ok_or(ParserError::Common)?
                     .as_name()?;
-                current_encoding = encodings.get(current_font).cloned();
+                current_encoding = Some(
+                    encodings.get(current_font)
+                        .ok_or_else(|| anyhow::anyhow!("PDF text references an unknown font"))?
+                );
             }
             "Tj" | "TJ" => {
-                _ = collect_text(&mut text, current_encoding, &operation.operands, elements);
+                let encoding = current_encoding
+                    .ok_or_else(|| anyhow::anyhow!("PDF text without a usable font"))?;
+                collect_text(&mut text, encoding, &operation.operands, elements)?;
             }
             "ET" => {
                 if !text.ends_with('\n') {
