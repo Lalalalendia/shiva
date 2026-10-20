@@ -22,9 +22,12 @@ This is a security regression **experiment for the standalone Shiva PDF library*
 | Text uses undeclared font `F1` | Error, not Complete | No implicit encoding |
 | Page `/Contents` references missing object | Error, not Complete | No silently empty index on broken page |
 | Unsupported `/Contents` stream compression filter | Error, not Complete | Prevent raw-compressed-byte fallback |
+| Declared FlateDecode with invalid compressed bytes | Error, not Complete | Never parse raw fallback bytes |
+| `/Contents` array containing a non-reference | Error, not Complete | No silent partial page extraction |
+| Valid blank PDF page with absent `/Contents` | Successful empty page | Strict checks do not reject legitimate blanks |
 | Truncated PDF without valid xref/page tree | Error, not Complete | Invalid input should not appear indexable |
 
-All fixtures are built from a valid PDF document/page/catalog, except the explicitly truncated case. They contain synthetic text only, no external resources or executable content. For each negative case, a returned `Ok(Document)` is a **test failure**. Panic or unbounded execution also fails CI. Assertions deliberately avoid printing the document's extracted text or bytes into CI logs.
+All fixtures are built from a valid PDF document/page/catalog, except the explicitly truncated case. **Current matrix: 3 positive controls and 10 fail-closed negatives.** They contain synthetic text only, no external resources or executable content. For each negative case, a returned `Ok(Document)` is a **test failure**. Panic or unbounded execution also fails CI. Assertions deliberately avoid printing the document's extracted text or bytes into CI logs.
 
 Linux `Shiva offline PDF` runs `pdf::hostile_tests::` and continues to require ToUnicode, decompression, total-budget and generation regressions. A new Windows-2022 workflow runs the same corpus in a native Rust PDF library build.
 
