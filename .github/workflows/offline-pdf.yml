@@ -46,6 +46,9 @@ jobs:
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::total_budget_ -- --nocapture
       - name: Reject synthetic malformed PDF /Contents, CMap, deep arrays and unknown fonts
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::hostile_tests::hostile_ -- --nocapture
+      - name: Prove complete strict ordered PDF page trees and reject corrupt /Kids
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::page_tree_tests::tree_ -- --nocapture
+
       - name: Generate a minimal real PDF with provisioned local fonts
         env:
           SHIVA_FONT_DIR: ${{ github.workspace }}/lib/fonts
