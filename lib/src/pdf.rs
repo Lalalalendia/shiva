@@ -473,6 +473,107 @@ mod tests {
         Ok(())
     }
 
+
+    // A minimal Type0/Identity-H page containing explicit UTF-16BE CMap
+    // mappings. These are character codes, NOT UTF-8 glyph bytes.
+    // This fixture exercises both beginbfchar and beginbfrange.
+    fn cid_identity_h_fixture(with_cmap: bool) -> anyhow::Result<Vec<u8>> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream, StringFormat};
+
+        const CMAP: &str = r#"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+2 beginbfchar
+<0001> <041F>
+<0002> <0440>
+endbfchar
+1 beginbfrange
+<0003> <0004> <4E16>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end"#;
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let cmap_id = pdf.add_object(Stream::new(dictionary! {}, CMAP.as_bytes().to_vec()));
+        let mut font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "BaseFont" => "FixtureCIDFont",
+            "Encoding" => "Identity-H",
+        };
+        if with_cmap {
+            font.set("ToUnicode", Object::Reference(cmap_id));
+        }
+        let font_id = pdf.add_object(font);
+        let resources_id = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+
+        // U+041F (П), U+0440 (р), U+4E16 (世), U+4E17 (丗).
+        // Identity-H means TWO bytes per glyph code.
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                Operation::new("Tj", vec![Object::String(
+                    vec![0, 1, 0, 2, 0, 3, 0, 4],
+                    StringFormat::Hexadecimal,
+                )]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let stream_id = pdf.add_object(Stream::new(dictionary! {}, content.encode()?));
+        let page_id = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => resources_id,
+            "Contents" => stream_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }));
+        let catalog_id = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog_id);
+        let mut output = Vec::new();
+        pdf.save_to(&mut output)?;
+        Ok(output)
+    }
+
+    #[test]
+    fn cid_identity_h_tounicode_preserves_unicode() -> anyhow::Result<()> {
+        let bytes = cid_identity_h_fixture(true)?;
+        let parsed = Transformer::parse(&Bytes::from(bytes))?;
+        let output = format!("{parsed:?}");
+        assert!(output.contains("Пр世丗"), "ToUnicode output lost Cyrillic/CJK: {output}");
+        assert_eq!(output.matches("Пр世丗").count(), 1, "duplicated text: {output}");
+        assert!(!output.contains('\u{FFFD}'), "Unicode replacement leaked into parsed text");
+        Ok(())
+    }
+
+    #[test]
+    fn cid_identity_h_without_cmap_fails_closed() -> anyhow::Result<()> {
+        let bytes = cid_identity_h_fixture(false)?;
+        let result = Transformer::parse(&Bytes::from(bytes));
+        assert!(result.is_err(), "CID text without ToUnicode must never look Complete");
+        Ok(())
+    }
+
     #[test]
     fn test_minimal_pdf_offline() -> anyhow::Result<()> {
         let document = Document::new(vec![Element::Text {
