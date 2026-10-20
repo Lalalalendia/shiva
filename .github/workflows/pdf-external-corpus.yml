@@ -1,0 +1,71 @@
+name: Shiva Pinned External PDF Corpus
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/tests/pdf_external_corpus.rs'
+      - 'lib/Cargo.toml'
+      - 'scripts/ci/fetch-pinned-pdf-corpus.py'
+      - 'scripts/ci/pinned-pdf-corpus-manifest.json'
+      - '.github/workflows/pdf-external-corpus.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/tests/pdf_external_corpus.rs'
+      - 'lib/Cargo.toml'
+      - 'scripts/ci/fetch-pinned-pdf-corpus.py'
+      - 'scripts/ci/pinned-pdf-corpus-manifest.json'
+      - '.github/workflows/pdf-external-corpus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  real-pdf-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download SHA-pinned CC0 PDF files to ephemeral QA directory
+        run: |
+          python scripts/ci/fetch-pinned-pdf-corpus.py --manifest scripts/ci/pinned-pdf-corpus-manifest.json --out "$RUNNER_TEMP/shiva-pdf-corpus"
+      - name: Verify exact page markers and fail-closed unsupported PDFs
+        env:
+          SHIVA_QA_PINNED_PDF_DIR: ${{ runner.temp }}/shiva-pdf-corpus
+        run: |
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_external_corpus -- --nocapture
+
+  real-pdf-windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download SHA-pinned CC0 PDF files to ephemeral QA directory
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'shiva-pdf-corpus'
+          python scripts/ci/fetch-pinned-pdf-corpus.py --manifest scripts/ci/pinned-pdf-corpus-manifest.json --out $dest
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned PDF corpus integrity gate failed' }
+      - name: Verify exact page markers and fail-closed unsupported PDFs
+        env:
+          SHIVA_QA_PINNED_PDF_DIR: ${{ runner.temp }}/shiva-pdf-corpus
+        run: |
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_external_corpus -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Windows pinned external PDF oracle failed' }
