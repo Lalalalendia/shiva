@@ -1,0 +1,44 @@
+name: Shiva Independent Chromium PDF QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/tests/pdf_chromium_corpus.rs'
+      - 'scripts/ci/generate-chromium-pdf-corpus.py'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-chromium-corpus.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/tests/pdf_chromium_corpus.rs'
+      - 'scripts/ci/generate-chromium-pdf-corpus.py'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-chromium-corpus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chromium-pdf-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Print local synthetic HTML with independent Chromium PDF writer
+        run: |
+          command -v google-chrome
+          python scripts/ci/generate-chromium-pdf-corpus.py --out "$RUNNER_TEMP/shiva-chromium" --browser "$(command -v google-chrome)"
+      - name: Prove all 11 page markers, body/tail tokens, order and Cyrillic
+        env:
+          SHIVA_QA_CHROMIUM_DIR: ${{ runner.temp }}/shiva-chromium
+        run: cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_chromium_corpus -- --nocapture
