@@ -3,7 +3,7 @@ use crate::core::{Document, Element, ListItem, ParserError, TransformerTrait};
 
 use anyhow;
 use bytes::Bytes;
-use log::{debug, warn};
+use log::warn;
 use lopdf::content::Content;
 use lopdf::Encoding;
 use lopdf::{Document as PdfDocument, LoadOptions, Object, ObjectId};
@@ -13,10 +13,9 @@ use typst::{eval::Tracer, foundations::Smart};
 pub struct Transformer;
 
 // Standalone library QA limits, not permission to enable PDF in the worker.
-// These bounds cover the input file, eager load-time stream decoding,
-// individual fonts' CMaps and each page's combined uncompressed content.
-// Process CPU, total allocations and document output budgets still need a
-// separate sandbox gate before any Akula integration.
+// Per-stream and page limits are supplemented below with cumulative page,
+// text, operation and element limits. Process CPU, actual RSS and all PDF
+// loading allocations still require a separate OS sandbox release gate.
 const MAX_PDF_INPUT: usize = 64 * 1024 * 1024;
 const MAX_DECOMPRESSED_STREAM: usize = 8 * 1024 * 1024;
 const MAX_TOUNICODE_CMAP: usize = 1024 * 1024;
@@ -25,6 +24,7 @@ const MAX_PDF_PAGES: usize = 1024;
 impl TransformerTrait for Transformer {
     fn parse(document: &Bytes) -> anyhow::Result<Document> {
         let mut elements: Vec<Element> = Vec::new();
+        let mut budget = PdfBudget::default();
         anyhow::ensure!(
             document.len() <= MAX_PDF_INPUT,
             "PDF input exceeds standalone parser byte limit"
@@ -40,7 +40,7 @@ impl TransformerTrait for Transformer {
         for (_page_number, page_id) in pdf_document.get_pages() {
             // get_page_content() already joins the page's /Contents streams.
             // Parsing it once PER stream repeats every page's text N times.
-            parse_page(page_id, &pdf_document, &mut elements)?;
+            parse_page(page_id, &pdf_document, &mut elements, &mut budget)?;
         }
         Ok(Document::new(elements))
     }
@@ -81,124 +81,132 @@ impl TransformerTrait for Transformer {
     }
 }
 
+// These are library QA admission ceilings, not process RSS/CPU guarantees.
+const MAX_PDF_TOTAL_PAGE_CONTENT: usize = 16 * 1024 * 1024;
+const MAX_PDF_TOTAL_TEXT: usize = 8 * 1024 * 1024;
+const MAX_PDF_EMITTED_ELEMENTS: usize = 100_000;
+const MAX_PDF_OPERATIONS: usize = 200_000;
+const MAX_PDF_TEXT_ARRAY_DEPTH: usize = 16;
+
+#[derive(Default)]
+struct PdfBudget {
+    page_bytes: usize,
+    text_bytes: usize,
+    emitted_elements: usize,
+    operations: usize,
+}
+
+impl PdfBudget {
+    fn charge(counter: &mut usize, bytes: usize, max: usize, label: &str) -> anyhow::Result<()> {
+        let next = counter.checked_add(bytes)
+            .ok_or_else(|| anyhow::anyhow!("{label} counter overflow"))?;
+        anyhow::ensure!(next <= max, "{label} exceeded");
+        *counter = next;
+        Ok(())
+    }
+
+    fn page_content(&mut self, bytes: usize) -> anyhow::Result<()> {
+        Self::charge(&mut self.page_bytes, bytes, MAX_PDF_TOTAL_PAGE_CONTENT,
+            "PDF cumulative decoded page budget")
+    }
+
+    fn text(&mut self, bytes: usize) -> anyhow::Result<()> {
+        Self::charge(&mut self.text_bytes, bytes, MAX_PDF_TOTAL_TEXT,
+            "PDF cumulative text budget")
+    }
+
+    fn elements(&mut self, count: usize) -> anyhow::Result<()> {
+        Self::charge(&mut self.emitted_elements, count, MAX_PDF_EMITTED_ELEMENTS,
+            "PDF emitted element budget")
+    }
+
+    fn operations(&mut self, count: usize) -> anyhow::Result<()> {
+        Self::charge(&mut self.operations, count, MAX_PDF_OPERATIONS,
+            "PDF cumulative operation budget")
+    }
+}
+
 fn parse_page(
     page_id: ObjectId,
     pdf_document: &PdfDocument,
     elements: &mut Vec<Element>,
+    budget: &mut PdfBudget,
 ) -> anyhow::Result<()> {
     fn collect_text(
         text: &mut String,
         encoding: &Encoding<'_>,
         operands: &[Object],
         elements: &mut Vec<Element>,
+        budget: &mut PdfBudget,
+        depth: usize,
     ) -> anyhow::Result<()> {
-        for operand in operands.iter() {
-            debug!("2 {:?}", operand);
-            match *operand {
-                Object::String(ref bytes, _) => {
+        anyhow::ensure!(
+            depth <= MAX_PDF_TEXT_ARRAY_DEPTH,
+            "PDF text array nesting budget exceeded"
+        );
+        for operand in operands {
+            // Never log the raw operand: it may contain private document text.
+            match operand {
+                Object::String(bytes, _) => {
                     let decoded_text = PdfDocument::decode_text(encoding, bytes)?;
-                    // A missing CID code would otherwise become U+FFFD and
-                    // risk publishing corrupted tokens as "Complete" text.
                     anyhow::ensure!(
                         !decoded_text.contains('\u{FFFD}'),
                         "PDF glyph could not be mapped to Unicode"
                     );
+                    budget.text(decoded_text.len())?;
                     text.push_str(&decoded_text);
-                    if bytes.len() == 1 && bytes[0] == 1 {
-                        match elements.last() {
-                            None => {
-                                let list_element = List {
-                                    elements: vec![],
-                                    numbered: false,
-                                };
-                                elements.push(list_element);
-                            }
-                            Some(el) => {
-                                match el {
-                                    List { .. } => {
-                                        let old_list = elements.pop().unwrap();
-                                        // let list = old_list.list_as_ref()?;
-                                        if let List {
-                                            elements: list_elements,
-                                            numbered,
-                                        } = old_list
-                                        {
-                                            let mut list_item_elements = list_elements.clone();
-                                            let text_element = Text {
-                                                text: text.clone(),
-                                                size: 8,
-                                            };
-                                            let new_list_item_element = ListItem {
-                                                element: text_element,
-                                            };
-                                            list_item_elements.push(new_list_item_element);
-                                            let new_list = List {
-                                                elements: list_item_elements,
-                                                numbered,
-                                            };
-                                            elements.push(new_list);
-                                            text.clear();
-                                        }
-                                    }
-                                    Paragraph { .. } => {
-                                        let old_paragraph = elements.pop().unwrap();
-                                        // let paragraph = old_paragraph.paragraph_as_ref()?;
-                                        if let Paragraph {
-                                            elements: paragraph_elements,
-                                        } = old_paragraph
-                                        {
-                                            let mut paragraph_elements = paragraph_elements.clone();
-                                            let text_element = Text {
-                                                text: text.clone(),
-                                                size: 8,
-                                            };
-                                            paragraph_elements.push(text_element);
-                                            let new_paragraph = Paragraph {
-                                                elements: paragraph_elements,
-                                            };
-                                            elements.push(new_paragraph);
-                                            text.clear();
 
-                                            let list_element = List {
-                                                elements: vec![],
-                                                numbered: false,
-                                            };
-                                            elements.push(list_element);
-                                        }
-                                    }
-                                    _ => {
-                                        let list_element = List {
-                                            elements: vec![],
-                                            numbered: false,
-                                        };
-                                        elements.push(*Box::new(list_element));
-                                    }
-                                }
+                    // Preserve Shiva's original special list marker handling
+                    // without cloning the entire existing paragraph/list.
+                    if bytes.len() == 1 && bytes[0] == 1 {
+                        if elements.is_empty() {
+                            budget.elements(1)?;
+                            elements.push(List { elements: vec![], numbered: false });
+                        } else if matches!(elements.last(), Some(List { .. })) {
+                            budget.elements(2)?;
+                            if let Some(List { elements: list_items, .. }) = elements.last_mut() {
+                                list_items.push(ListItem {
+                                    element: Text {
+                                        text: std::mem::take(text),
+                                        size: 8,
+                                    },
+                                });
                             }
+                        } else if matches!(elements.last(), Some(Paragraph { .. })) {
+                            budget.elements(3)?;
+                            if let Some(Paragraph { elements: paragraph_items }) = elements.last_mut() {
+                                paragraph_items.push(Text {
+                                    text: std::mem::take(text),
+                                    size: 8,
+                                });
+                            }
+                            elements.push(List { elements: vec![], numbered: false });
+                        } else {
+                            budget.elements(1)?;
+                            elements.push(List { elements: vec![], numbered: false });
                         }
                     }
                 }
-                Object::Array(ref arr) => {
-                    collect_text(text, encoding, arr, elements)?;
+                Object::Array(arr) => {
+                    collect_text(text, encoding, arr, elements, budget, depth + 1)?;
+                    budget.text(1)?;
                     text.push(' ');
                 }
-                Object::Integer(i) => {
-                    if i < -100 {
-                        text.push(' ');
-                    }
+                Object::Integer(i) if *i < -100 => {
+                    budget.text(1)?;
+                    text.push(' ');
                 }
                 _ => {}
             }
         }
         Ok(())
     }
-    let mut text = String::new();
 
+    let mut text = String::new();
     let fonts = pdf_document.get_page_fonts(page_id)?;
+    anyhow::ensure!(fonts.len() <= 64, "PDF per-page font count budget exceeded");
     let mut encodings = BTreeMap::new();
     for (name, font) in fonts {
-        // Don't silently fall back to a Latin single-byte encoding for
-        // composite CID fonts. They require a real ToUnicode CMap.
         let composite = font.get(b"Subtype")
             .and_then(Object::as_name)
             .map(|name| name == b"Type0")
@@ -213,69 +221,40 @@ fn parse_page(
         encodings.insert(name, encoding);
     }
 
-    // The bounded variant is essential: page /Contents can include many
-    // individually compressed streams, each contributing to decompression.
-    let vec = pdf_document.get_page_content_with_limit(
-        page_id, MAX_DECOMPRESSED_STREAM,
-    )?;
-    let content = Content::decode(&vec)?;
+    let page = pdf_document.get_page_content_with_limit(page_id, MAX_DECOMPRESSED_STREAM)?;
+    budget.page_content(page.len())?;
+    let content = Content::decode(&page)?;
+    budget.operations(content.operations.len())?;
+
     let mut current_encoding = None;
     for operation in &content.operations {
-        debug!("1 {:?}", operation.operator);
         match operation.operator.as_ref() {
             "Tm" => {
-                let text_element = Text {
-                    text: text.clone(),
-                    size: 8,
-                };
-                match elements.last() {
-                    None => {
-                        let paragraph_element = Paragraph {
-                            elements: vec![text_element],
-                        };
-                        elements.push(paragraph_element);
-                    }
-                    Some(el) => match el {
-                        Paragraph { .. } => {
-                            let old_paragraph = elements.pop().unwrap();
-                            if let Paragraph {
-                                elements: paragraph_elements,
-                            } = old_paragraph
-                            {
-                                let mut paragraph_elements = paragraph_elements.clone();
-                                paragraph_elements.push(text_element);
-                                let new_paragraph = Paragraph {
-                                    elements: paragraph_elements,
-                                };
-                                elements.push(new_paragraph);
-                            }
-                        }
-                        _ => {
-                            elements.push(text_element);
-                        }
-                    },
+                budget.elements(if elements.is_empty() { 2 } else { 1 })?;
+                let item = Text { text: std::mem::take(&mut text), size: 8 };
+                if elements.is_empty() {
+                    elements.push(Paragraph { elements: vec![item] });
+                } else if let Some(Paragraph { elements: paragraph_items }) = elements.last_mut() {
+                    paragraph_items.push(item);
+                } else {
+                    elements.push(item);
                 }
-                text.clear();
             }
             "Tf" => {
-                let current_font = operation
-                    .operands
-                    .first()
-                    .ok_or(ParserError::Common)?
-                    .as_name()?;
-                current_encoding = Some(
-                    encodings.get(current_font)
-                        .ok_or_else(|| anyhow::anyhow!("PDF text references an unknown font"))?
-                );
+                let font = operation.operands.first()
+                    .ok_or(ParserError::Common)?.as_name()?;
+                current_encoding = Some(encodings.get(font)
+                    .ok_or_else(|| anyhow::anyhow!("PDF text references an unknown font"))?);
             }
             "Tj" | "TJ" => {
                 let encoding = current_encoding
                     .ok_or_else(|| anyhow::anyhow!("PDF text without a usable font"))?;
-                collect_text(&mut text, encoding, &operation.operands, elements)?;
+                collect_text(&mut text, encoding, &operation.operands, elements, budget, 0)?;
             }
             "ET" => {
                 if !text.ends_with('\n') {
-                    text.push('\n')
+                    budget.text(1)?;
+                    text.push('\n');
                 }
             }
             _ => {}
@@ -283,66 +262,32 @@ fn parse_page(
     }
 
     if !text.is_empty() {
-        let text_element = Text {
-            text: text.clone(),
-            size: 8,
-        };
-        match elements.last() {
-            None => {
-                let paragraph_element = Paragraph {
-                    elements: vec![text_element],
-                };
-                elements.push(*Box::new(paragraph_element));
-            }
-            Some(el) => {
-                match el {
-                    Paragraph { .. } => {
-                        let old_paragraph = elements.pop().unwrap();
-                        if let Paragraph {
-                            elements: paragraph_elements,
-                        } = old_paragraph
-                        {
-                            let mut paragraph_elements = paragraph_elements.clone();
-                            paragraph_elements.push(text_element);
-                            let new_paragraph = Paragraph {
-                                elements: paragraph_elements,
-                            };
-                            elements.push(*Box::new(new_paragraph));
-                        }
-                    }
-                    List { .. } => {
-                        let old_list = elements.pop().unwrap();
-                        // let list = old_list.list_as_ref()?;
-                        if let List {
-                            elements: list_elements,
-                            numbered,
-                        } = old_list
-                        {
-                            let mut list_item_elements = list_elements.clone();
-                            let new_list_item_element = ListItem {
-                                element: text_element,
-                            };
-                            list_item_elements.push(new_list_item_element);
-                            let new_list = List {
-                                elements: list_item_elements,
-                                numbered,
-                            };
-                            elements.push(*Box::new(new_list));
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        let item = Text { text, size: 8 };
+        if elements.is_empty() {
+            budget.elements(2)?;
+            elements.push(Paragraph { elements: vec![item] });
+        } else if let Some(Paragraph { elements: paragraph_items }) = elements.last_mut() {
+            budget.elements(1)?;
+            paragraph_items.push(item);
+        } else if let Some(List { elements: list_items, .. }) = elements.last_mut() {
+            budget.elements(2)?;
+            list_items.push(ListItem { element: item });
+        } else {
+            // The previous parser silently discarded trailing text here.
+            budget.elements(1)?;
+            elements.push(item);
         }
     }
-
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use crate::core::*;
-    use crate::pdf::{Transformer, MAX_DECOMPRESSED_STREAM};
+    use crate::pdf::{
+        PdfBudget, Transformer, MAX_DECOMPRESSED_STREAM, MAX_PDF_EMITTED_ELEMENTS,
+        MAX_PDF_TOTAL_PAGE_CONTENT, MAX_PDF_TOTAL_TEXT,
+    };
     use crate::{markdown, pdf};
     use lopdf::LoadOptions;
     use bytes::Bytes;
@@ -641,6 +586,176 @@ end"#;
             Transformer::parse(&Bytes::from(output)).is_err(),
             "Shiva must reject an oversized decoded PDF page"
         );
+        Ok(())
+    }
+
+
+    #[test]
+    fn total_budget_counters_reject_overflow_without_wraparound() -> anyhow::Result<()> {
+        let mut budget = PdfBudget::default();
+        budget.text(MAX_PDF_TOTAL_TEXT)?;
+        assert!(budget.text(1).is_err(), "text ceiling must be enforced");
+        let mut budget = PdfBudget::default();
+        budget.page_content(MAX_PDF_TOTAL_PAGE_CONTENT)?;
+        assert!(budget.page_content(1).is_err(), "global page ceiling must be enforced");
+        let mut budget = PdfBudget::default();
+        budget.elements(MAX_PDF_EMITTED_ELEMENTS)?;
+        assert!(budget.elements(1).is_err(), "element count must be enforced");
+        let mut budget = PdfBudget::default();
+        assert!(budget.text(usize::MAX).is_err(), "counter wraparound must fail");
+        Ok(())
+    }
+
+    #[test]
+    fn total_budget_rejects_five_individually_valid_compressed_pages() -> anyhow::Result<()> {
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        const PAGE_DECODED_BYTES: usize = 4 * 1024 * 1024 + 64;
+        assert!(PAGE_DECODED_BYTES < MAX_DECOMPRESSED_STREAM);
+        assert!(5 * PAGE_DECODED_BYTES > MAX_PDF_TOTAL_PAGE_CONTENT);
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let mut page_ids = Vec::new();
+        for _ in 0..5 {
+            let mut page_stream = Stream::new(
+                dictionary! {}, vec![b' '; PAGE_DECODED_BYTES],
+            );
+            page_stream.compress()?;
+            let stream_id = pdf.add_object(page_stream);
+            let page_id = pdf.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => stream_id,
+                "Resources" => dictionary! {},
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+            "Count" => page_ids.len() as i64,
+        }));
+        let catalog = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)?;
+        assert!(bytes.len() < 1_000_000, "compressed test fixture unexpectedly large");
+        let err = Transformer::parse(&Bytes::from(bytes))
+            .expect_err("individually legal pages must exceed combined decode budget");
+        assert!(
+            err.to_string().contains("cumulative decoded page budget"),
+            "aggregate budget error expected: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn total_budget_rejects_unicode_output_across_two_pages() -> anyhow::Result<()> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream, StringFormat};
+
+        const CHARS_PER_PAGE: usize = 5 * 1024 * 1024;
+        assert!(CHARS_PER_PAGE * 2 > MAX_PDF_TOTAL_TEXT);
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let font_id = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources_id = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let mut page_ids = Vec::new();
+        for _ in 0..2 {
+            let ops = Content { operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                Operation::new("Tj", vec![Object::String(
+                    vec![b'A'; CHARS_PER_PAGE], StringFormat::Literal,
+                )]),
+                Operation::new("ET", vec![]),
+            ] };
+            let mut stream = Stream::new(dictionary! {}, ops.encode()?);
+            stream.compress()?;
+            let contents = pdf.add_object(stream);
+            let page_id = pdf.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id,
+                "Contents" => contents, "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+            "Count" => 2,
+        }));
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)?;
+        assert!(bytes.len() < 1_000_000, "fixture must be highly compressed");
+        let err = Transformer::parse(&Bytes::from(bytes))
+            .expect_err("two individually acceptable pages exceed global output budget");
+        assert!(err.to_string().contains("PDF cumulative text budget"),
+            "output text must be rejected by the global limit: {err}");
+        Ok(())
+    }
+
+    /// Repeated text matrix operators must append in source order without
+    /// cloning all preceding paragraph children at every step.
+    #[test]
+    fn total_budget_many_tm_operations_keep_order() -> anyhow::Result<()> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let font = pdf.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let resources = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font },
+        });
+        let mut ops = vec![
+            Operation::new("BT", vec![]),
+            Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+        ];
+        for i in 0..1500 {
+            ops.push(Operation::new(
+                "Tj", vec![Object::string_literal(format!("TM_{i:04}_MARKER"))],
+            ));
+            ops.push(Operation::new("Tm", vec![]));
+        }
+        ops.push(Operation::new("ET", vec![]));
+        let content = Content { operations: ops };
+        let stream_id = pdf.add_object(Stream::new(dictionary! {}, content.encode()?));
+        let page = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => resources,
+            "Contents" => stream_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
+        }));
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)?;
+        let result = Transformer::parse(&Bytes::from(bytes))?;
+        let debug_output = format!("{result:?}");
+        assert_eq!(debug_output.matches("_MARKER").count(), 1500);
+        assert!(debug_output.find("TM_0000_MARKER").unwrap()
+            < debug_output.find("TM_1499_MARKER").unwrap());
         Ok(())
     }
 
