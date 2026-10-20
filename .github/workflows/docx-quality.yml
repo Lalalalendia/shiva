@@ -27,5 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: DOCX full textual run corpus (minimal dependencies)
         run: cargo test -p shiva --no-default-features --features docx,markdown,html,xml --lib docx::tests::text_ -- --nocapture
+      - name: Preserve existing DOCX sample semantics
+        run: cargo test -p shiva --no-default-features --features docx,markdown,html,xml --lib docx::tests::test_parse -- --nocapture
       - name: Check bounded feature-set compilation
         run: cargo check -p shiva --no-default-features --features docx,markdown,html,xml

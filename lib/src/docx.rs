@@ -5,7 +5,7 @@ use crate::core::{
 use bytes::Bytes;
 use docx_rs::{
     read_docx, AbstractNumbering, Docx, Hyperlink, HyperlinkType, IndentLevel, Level, LevelJc,
-    LevelText, NumberFormat, Numbering, NumberingId, Paragraph, ParagraphStyle, Pic, Run, RunChild,
+    LevelText, NumberFormat, Numbering, NumberingId, Paragraph, Pic, Run, RunChild,
     SpecialIndentType, Start, TableRowChild,
 };
 use log::{error, info, warn};
@@ -139,11 +139,25 @@ impl TransformerTrait for Transformer {
             return result;
         }
 
+        // DOCX paragraphs may omit w:pStyle entirely. In that case Word
+        // uses its document default; absence of a style is not absence of
+        // text. Custom style identifiers must not silently discard content.
+        fn push_paragraph(result: &mut Vec<Element>, paragraph: &docx_rs::Paragraph) {
+            let text = extract_text(paragraph);
+            let style = paragraph.property.style.as_ref().map(|s| s.val.as_str());
+            let element = match style {
+                Some("Heading1") => Element::Header { level: 1, text },
+                Some("Heading2") => Element::Header { level: 2, text },
+                Some("Normal" | "BodyText") => Element::Text { text, size: 16 },
+                // Unrecognized and unstyled paragraphs are still searchable.
+                // Do not create empty blocks for purely structural blanks.
+                _ if !text.is_empty() => Element::Text { text, size: 16 },
+                _ => return,
+            };
+            result.push(element);
+        }
+
         let docx = read_docx(document)?;
-        const HEADING1: &str = "Heading1";
-        const HEADING2: &str = "Heading2";
-        const NORMAL: &str = "Normal";
-        const BODY_TEXT: &str = "BodyText";
         let mut result: Vec<Element> = vec![];
 
         let mut is_list_numbered = false;
@@ -210,41 +224,7 @@ impl TransformerTrait for Transformer {
                             });
                         }
 
-                        match &par.property.style {
-                            Some(ParagraphStyle { val }) => match val.as_str() {
-                                HEADING1 => {
-                                    let text = extract_text(&par);
-                                    let element = Element::Header { level: 1, text };
-
-                                    result.push(element);
-                                }
-                                HEADING2 => {
-                                    let text = extract_text(&par);
-                                    let element = Element::Header { level: 2, text };
-
-                                    result.push(element);
-                                }
-
-                                BODY_TEXT => {
-                                    let text = extract_text(&par);
-                                    let element = Element::Text { text, size: 16 };
-
-                                    result.push(element);
-                                }
-
-                                NORMAL => {
-                                    let text = extract_text(&par);
-                                    let element = Element::Text { text, size: 16 };
-
-                                    result.push(element);
-                                }
-
-                                _ => {}
-                            },
-                            _ => {
-                                // TODO: Implement other styles
-                            }
-                        }
+                        push_paragraph(&mut result, &par);
                     }
                 } else {
                     if let Some((_, list_items)) = current_list.take() {
@@ -253,41 +233,7 @@ impl TransformerTrait for Transformer {
                             numbered: is_list_numbered,
                         });
                     }
-                    match &par.property.style {
-                        Some(ParagraphStyle { val }) => match val.as_str() {
-                            HEADING1 => {
-                                let text = extract_text(&par);
-                                let element = Element::Header { level: 1, text };
-
-                                result.push(element);
-                            }
-                            HEADING2 => {
-                                let text = extract_text(&par);
-                                let element = Element::Header { level: 2, text };
-
-                                result.push(element);
-                            }
-
-                            BODY_TEXT => {
-                                let text = extract_text(&par);
-                                let element = Element::Text { text, size: 16 };
-
-                                result.push(element);
-                            }
-
-                            NORMAL => {
-                                let text = extract_text(&par);
-                                let element = Element::Text { text, size: 16 };
-
-                                result.push(element);
-                            }
-
-                            _ => {}
-                        },
-                        _ => {
-                            // TODO: Implement other styles
-                        }
-                    }
+                    push_paragraph(&mut result, &par);
                 }
             } else {
                 if let Some((_, list_items)) = current_list.take() {
@@ -596,6 +542,51 @@ mod tests {
             }]),
             parsed
         );
+        Ok(())
+    }
+
+
+    /// OOXML permits a paragraph with no w:pStyle. Previously Shiva silently
+    /// dropped the complete paragraph, even though the run contains text.
+    #[test]
+    fn text_unstyled_paragraph_keeps_unicode() -> anyhow::Result<()> {
+        let paragraph = Paragraph::new()
+            .add_run(Run::new().add_text("Без стиля / 世界 / beta"));
+        let mut cursor = Cursor::new(Vec::new());
+        Docx::new().add_paragraph(paragraph).build().pack(&mut cursor)?;
+        let raw = cursor.into_inner();
+        let decoded = read_docx(&Bytes::from(raw.clone()))?;
+        let first = decoded.document.children.first().expect("DOCX paragraph");
+        assert!(matches!(
+            first,
+            docx_rs::DocumentChild::Paragraph(p) if p.property.style.is_none()
+        ), "fixture must omit explicit paragraph style");
+        let parsed = Transformer::parse(&Bytes::from(raw))?;
+        assert_eq!(parsed, Document::new(vec![Element::Text {
+            text: "Без стиля / 世界 / beta".to_owned(),
+            size: 16,
+        }]));
+        Ok(())
+    }
+
+    /// Unknown style names are not a reason to lose readable document text;
+    /// headings recognized by Shiva still keep their intended semantics.
+    #[test]
+    fn text_custom_style_and_heading_keep_content() -> anyhow::Result<()> {
+        let custom = Paragraph::new()
+            .style("CustomBusinessParagraph")
+            .add_run(Run::new().add_text("Custom кириллица"));
+        let heading = Paragraph::new()
+            .style("Heading1")
+            .add_run(Run::new().add_text("Heading 世界"));
+        let mut cursor = Cursor::new(Vec::new());
+        Docx::new().add_paragraph(custom).add_paragraph(heading)
+            .build().pack(&mut cursor)?;
+        let parsed = Transformer::parse(&Bytes::from(cursor.into_inner()))?;
+        assert_eq!(parsed, Document::new(vec![
+            Element::Text { text: "Custom кириллица".to_owned(), size: 16 },
+            Element::Header { level: 1, text: "Heading 世界".to_owned() },
+        ]));
         Ok(())
     }
 
