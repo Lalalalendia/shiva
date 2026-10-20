@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "origin": {
+    "repository": "tinytoolkit-org/pdf-sample-files",
+    "commit": "4fd733c47ead5446b06372ab910cb78d1c7da55e",
+    "license": "CC0-1.0",
+    "generator": "pdf-lib / @cantoo/pdf-lib"
+  },
+  "fixtures": [
+    {
+      "name": "sample-1-page.pdf",
+      "bytes": 3312,
+      "git_blob_sha1": "ddab89a772c7727cfab3d50f094a41a6950292cd",
+      "oracle": "exact-page-text",
+      "pages": 1,
+      "sha256": "ada1603d4396b84ac0d85ca940b0149df13fd4a6beb46f2f2f62c4c8a6bc69b2"
+    },
+    {
+      "name": "sample-10-pages.pdf",
+      "bytes": 20337,
+      "git_blob_sha1": "cd24d9ed7c7ac203712c7aa2f21ab85e5d9c3d5f",
+      "oracle": "exact-page-text",
+      "pages": 10,
+      "sha256": "e8ce18676ce6c053532c6ace5a28fd9c0a79df22a8e19ae75026a249dcc2db6d"
+    },
+    {
+      "name": "sample-100-pages.pdf",
+      "bytes": 190765,
+      "git_blob_sha1": "24fc67c23f928bc6743ba1ef9f820e8412ede61d",
+      "oracle": "exact-page-text",
+      "pages": 100,
+      "sha256": "b26a010ee2523020ed49409b9308efd80357ccf67f118d674cca6cc26b1e0d4c"
+    },
+    {
+      "name": "sample-blank-a4.pdf",
+      "bytes": 1348,
+      "git_blob_sha1": "5cb2352123c841e11a4882676e8b8641c568c3fe",
+      "oracle": "empty-text-layer",
+      "pages": 1,
+      "sha256": "b2ec9ddd2ecdcabb89c212b2a0245ad24c3f0132fb6bf19d47d373b07dd6b58f"
+    },
+    {
+      "name": "sample-scanned.pdf",
+      "bytes": 432160,
+      "git_blob_sha1": "be086b3e2a18235a2d72c3b70a2ecd2733ad148f",
+      "oracle": "needs-ocr",
+      "pages": 3,
+      "sha256": "d32a62e246778d856c85b03bfc6c91c36c9a071756b733f78daf46b4253de634"
+    },
+    {
+      "name": "sample-corrupted.pdf",
+      "bytes": 7062,
+      "git_blob_sha1": "0d0807c30a1310f7d7ab6dca08776ceb2e345fca",
+      "oracle": "reject",
+      "sha256": "ce46a4623725ac4497ded46604283789e193719e934656d00ff219725a21954a"
+    },
+    {
+      "name": "sample-password-protected.pdf",
+      "bytes": 7618,
+      "git_blob_sha1": "acbb6ca2491ee5840755ed1b1b02de8b2cbd5c11",
+      "oracle": "reject-without-password",
+      "sha256": "010a138651a1b04955ec12436a8e9fea33b1b171a7a10896278223fffe20f734"
+    }
+  ]
+}

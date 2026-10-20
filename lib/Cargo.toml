@@ -96,6 +96,8 @@ csv = ["dep:csv"]
 markdown = ["regex", "pulldown-cmark", "comrak"]
 html = ["scraper", "ego-tree"]
 pdf = ["lopdf", "flate2", "typst", "ttf-parser", "comemo", "time", "typst-pdf"]
+# QA-only external CC0 corpus, never enabled by the default/all worker build.
+qa-external-pdf = ["pdf"]
 json = ["serde", "serde_json", "base64"]
 xml = ["serde", "serde-xml-rs", "quick-xml"]
 rtf = ["rtf-parser", "image"]
