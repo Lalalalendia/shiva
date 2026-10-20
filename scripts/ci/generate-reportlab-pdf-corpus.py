@@ -13,10 +13,15 @@ from reportlab import Version as REPORTLAB_VERSION
 from reportlab.lib.pagesizes import A4, landscape, letter
 from reportlab.pdfgen import canvas
 
+# Fingerprints independently observed to agree on Linux and Windows CI.
+# Any dependency, OS or generator output drift fails before Rust reads PDFs.
 PROFILES = (
-    ("reportlab-1-page.pdf", 1, False),
-    ("reportlab-12-pages.pdf", 12, True),
-    ("reportlab-rotated-3-pages.pdf", 3, True),
+    ("reportlab-1-page.pdf", 1, False,
+     "f7aa5fdd269eba8389cda766e7679e381157cf3bde50dbb3d9b425c3ac6d0ef3"),
+    ("reportlab-12-pages.pdf", 12, True,
+     "0cccac77ff83c65b86e7a1e02ed668b383180178929c6ef993d2b445d670b8c5"),
+    ("reportlab-rotated-3-pages.pdf", 3, True,
+     "6a935e0e8c4d72e0604d4d22c6585fdc8a4fe78d2eda7d6bc1a5ec59b654ba9e"),
 )
 MAX_PDF_SIZE = 2 * 1024 * 1024
 
@@ -60,13 +65,15 @@ def main() -> None:
         raise RuntimeError("unapproved ReportLab generator version")
     # Prevent writing over existing QA files or following a pre-existing tree.
     args.out.mkdir(mode=0o700, parents=True, exist_ok=False)
-    for filename, pages, layout in PROFILES:
+    for filename, pages, layout, expected_sha256 in PROFILES:
         path = args.out / filename
         create_pdf(path, pages, layout)
         raw = path.read_bytes()
         if not 100 <= len(raw) <= MAX_PDF_SIZE or not raw.startswith(b"%PDF-"):
             raise ValueError("ReportLab output failed size/PDF header bounds")
         sha = hashlib.sha256(raw).hexdigest()
+        if sha != expected_sha256:
+            raise ValueError("generated PDF SHA-256 changed from cross-platform pinned corpus")
         print(f"SHIVA_RL_GENERATED={filename};bytes={len(raw)};sha256={sha};pages={pages}")
     print(f"SHIVA_RL_GENERATOR=pass;version={REPORTLAB_VERSION};profiles={len(PROFILES)}")
 
