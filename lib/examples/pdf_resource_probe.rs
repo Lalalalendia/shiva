@@ -17,7 +17,8 @@ fn fixture(aggregate: bool) -> anyhow::Result<Vec<u8>> {
         "Font" => dictionary! { "F1" => font_id },
     });
     let mut page_ids = Vec::new();
-    for _ in 0..if aggregate { 5 } else { 1 } {
+    let page_count = if aggregate { 5 } else { 1 };
+    for _ in 0..page_count {
         let mut stream = if aggregate {
             // Five individually legal 4-MiB page streams exceed the
             // cumulative 16-MiB decoded-page ceiling in the next PR.
