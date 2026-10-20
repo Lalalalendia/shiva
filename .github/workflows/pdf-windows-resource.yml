@@ -1,0 +1,99 @@
+name: Shiva Windows LPAC PDF resource QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/examples/pdf_resource_probe.rs'
+      - 'lib/Cargo.toml'
+      - 'worker-client/src/windows_launch.rs'
+      - 'worker-client/src/lib.rs'
+      - 'worker-client/tests/pdf_resource_windows.rs'
+      - '.github/workflows/pdf-windows-resource.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/examples/pdf_resource_probe.rs'
+      - 'lib/Cargo.toml'
+      - 'worker-client/src/windows_launch.rs'
+      - 'worker-client/src/lib.rs'
+      - 'worker-client/tests/pdf_resource_windows.rs'
+      - '.github/workflows/pdf-windows-resource.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-lpac-pdf-probe:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build synthetic PDF executable only, NOT shipping shiva-worker
+        run: cargo build -p shiva --example pdf_resource_probe --no-default-features --features pdf,markdown,html,xml
+      - name: Provision CI-only exact AppContainer SID read/execute
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:RUNNER_OS -ne 'Windows') {
+            throw 'QA ACL fixture is restricted to an ephemeral hosted Windows runner'
+          }
+          Add-Type -TypeDefinition @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class ShivaPdfLpacTestSid {
+              [DllImport("userenv.dll", EntryPoint = "DeriveAppContainerSidFromAppContainerName", CharSet = CharSet.Unicode)]
+              private static extern int Derive(string name, out IntPtr sid);
+              [DllImport("advapi32.dll", EntryPoint = "ConvertSidToStringSidW", CharSet = CharSet.Unicode, SetLastError = true)]
+              private static extern bool ToStringSid(IntPtr sid, out IntPtr text);
+              [DllImport("advapi32.dll", EntryPoint = "FreeSid")]
+              private static extern IntPtr FreeSid(IntPtr sid);
+              [DllImport("kernel32.dll", EntryPoint = "LocalFree")]
+              private static extern IntPtr LocalFree(IntPtr text);
+              public static string Resolve(string name) {
+                  IntPtr sid = IntPtr.Zero, text = IntPtr.Zero;
+                  int hr = Derive(name, out sid);
+                  if (hr < 0 || sid == IntPtr.Zero)
+                      throw new Exception("DeriveAppContainerSidFromAppContainerName failed: " + hr.ToString("X8"));
+                  try {
+                      if (!ToStringSid(sid, out text) || text == IntPtr.Zero)
+                          throw new Exception("ConvertSidToStringSidW failed");
+                      try { return Marshal.PtrToStringUni(text); }
+                      finally { LocalFree(text); }
+                  } finally { FreeSid(sid); }
+              }
+          }
+          '@
+          $sid = [ShivaPdfLpacTestSid]::Resolve('AkulaShivaWorkerNoNetworkV1')
+          if ($sid -notmatch '^S-1-15-2-') { throw 'Unexpected LPAC SID' }
+          $exe = Join-Path $env:GITHUB_WORKSPACE 'target\debug\examples\pdf_resource_probe.exe'
+          if (!(Test-Path -LiteralPath $exe -PathType Leaf)) {
+            throw 'Synthetic PDF QA executable missing'
+          }
+          $grant = "*$($sid):(RX)"
+          $current = (Get-Item -LiteralPath $exe).Directory
+          while ($null -ne $current -and $current.FullName -ne $current.Root.FullName) {
+            & icacls.exe $current.FullName /grant:r $grant | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Exact LPAC SID directory traversal failed' }
+            $current = $current.Parent
+          }
+          & icacls.exe $exe /grant:r $grant | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Exact LPAC SID executable read/execute failed' }
+          "SHIVA_TEST_PDF_QA_BIN=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host 'SHIVA_WIN_PDF_EXACT_LPAC_ACL=pass'
+      - name: Run synthetic PDFs in real attested AppContainer and bounded Job
+        run: |
+          $output = & cargo test -p shiva-worker-client --features qa-pdf-windows --test pdf_resource_windows -- --ignored --nocapture 2>&1
+          $status = $LASTEXITCODE
+          $text = $output -join "`n"
+          $output | ForEach-Object { Write-Host $_ }
+          if ($status -ne 0) { throw "Windows PDF LPAC QA failed with status=$status" }
+          if ($text -notmatch 'test result: ok\. 1 passed') { throw 'Expected exact one Windows QA test' }
+          if ($text -notmatch 'SHIVA_WIN_PDF_LPAC_JOB_RESOURCE_QA=pass') { throw 'Missing LPAC PDF memory proof' }
+          if ($text -notmatch 'SHIVA_WIN_JOB_AT_CREATION=verified') { throw 'Missing atomic Job creation proof' }
+          if ($text -notmatch 'SHIVA_WIN_PRE_RESUME_ATTESTATION=') { throw 'Missing AppContainer attestation proof' }

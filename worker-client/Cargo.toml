@@ -6,6 +6,10 @@ publish = false
 license = "MIT OR Apache-2.0"
 description = "Pinned binary host supervisor for standalone, untrusted Shiva extractor output"
 
+[features]
+default = []
+qa-pdf-windows = []
+
 [dependencies]
 shiva-extractor-protocol = { path = "../extractor-protocol" }
 blake3 = "1"

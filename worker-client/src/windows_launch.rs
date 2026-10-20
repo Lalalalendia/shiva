@@ -35,7 +35,8 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::JobObjects::{
     CreateJobObjectW, IsProcessInJob,
-    SetInformationJobObject, TerminateJobObject, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+    JobObjectExtendedLimitInformation,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_PROCESS_TIME,
@@ -562,6 +563,69 @@ pub(crate) fn spawn(executable: &Path, args: &[String], pinned_image: &File) -> 
         _job: job, process, stdin: Some(stdin_write.file()), stdout: Some(stdout_read.file()),
     })
 }
+/// CI-only QA: exercise the real Windows LPAC+Job launcher on a synthetic
+/// PDF probe. Never add PDF to the shipping worker's format allowlist.
+#[cfg(all(debug_assertions, feature = "qa-pdf-windows"))]
+pub fn windows_pdf_resource_qa(executable: &Path) -> io::Result<(usize, usize)> {
+    let hash = super::binary_blake3(executable)
+        .map_err(|e| io::Error::other(format!("QA image hash: {e:?}")))?;
+    let settings = WorkerSettings {
+        executable: executable.to_path_buf(),
+        expected_binary_blake3: hash,
+        expected_version: "0.1.0".to_owned(),
+        timeout: Duration::from_secs(10),
+    };
+    let pinned = pin_executable(&settings)
+        .map_err(|e| io::Error::other(format!("QA image pinning: {e:?}")))?;
+    let mut peaks = [0usize; 2];
+    for (i, mode) in ["smoke", "cumulative"].iter().enumerate() {
+        let mut child = spawn(executable, &[mode.to_string()], &pinned)?;
+        drop(child.stdin.take());
+        let stdout = child.stdout.take()
+            .ok_or_else(|| io::Error::other("QA child stdout missing"))?;
+        let reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
+            let mut result = Vec::new();
+            stdout.take(257).read_to_end(&mut result)?;
+            Ok(result)
+        });
+        let started = Instant::now();
+        let status = loop {
+            if started.elapsed() >= Duration::from_secs(10) {
+                let _ = child.kill();
+                return Err(io::Error::other("QA child exceeded deadline"));
+            }
+            match child.try_wait()? {
+                Some(status) => break status,
+                None => sleep(Duration::from_millis(10)),
+            }
+        };
+        let output = reader.join()
+            .map_err(|_| io::Error::other("QA stdout reader panicked"))??;
+        if !status.success()
+            || std::str::from_utf8(&output).map(str::trim)
+                != Ok("SHIVA_PDF_QA_CHILD_OK")
+        {
+            return Err(io::Error::other("QA PDF process failure or stdout drift"));
+        }
+        let mut usage = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        if unsafe { QueryInformationJobObject(
+            child._job.raw(), JobObjectExtendedLimitInformation,
+            (&mut usage as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32, null_mut(),
+        ) } == 0 {
+            return Err(io::Error::other(format!(
+                "QA Job accounting unavailable: {}", fail()
+            )));
+        }
+        let peak = usage.PeakJobMemoryUsed;
+        if peak == 0 || peak > JOB_MEMORY_BYTES {
+            return Err(io::Error::other("QA Job memory limit was not respected"));
+        }
+        peaks[i] = peak;
+    }
+    Ok((peaks[0], peaks[1]))
+}
+
 #[cfg(debug_assertions)]
 pub fn windows_denial_probe(
     settings: &WorkerSettings, read: &Path, write: &Path, port: u16, aap_only: &Path
