@@ -1,0 +1,31 @@
+[package]
+name = "shiva-pdf-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+bytes = "1.5"
+shiva = { path = "../lib", default-features = false, features = ["pdf"] }
+
+[[bin]]
+name = "pdf_parse"
+path = "fuzz_targets/pdf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pdf_required_graph"
+path = "fuzz_targets/pdf_required_graph.rs"
+test = false
+doc = false
+bench = false
+
+# cargo-fuzz manages a separate workspace: no nightly/sanitizer dependency
+# can accidentally enter the release worker or root Cargo.lock.
+[workspace]
