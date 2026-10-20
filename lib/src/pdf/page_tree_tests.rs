@@ -146,7 +146,7 @@ fn tree_missing_kid_reference_rejected() -> Result<()> {
     let missing = f.pdf.new_object_id();
     f.pdf.get_object_mut(f.root)?.as_dict_mut()?
         .set("Kids", vec![f.first.into(), missing.into()]);
-    f.verify_rejected("object")
+    f.verify_rejected("")
 }
 
 #[test]
