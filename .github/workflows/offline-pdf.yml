@@ -40,6 +40,8 @@ jobs:
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::multi_stream_page_does_not_duplicate_extracted_text -- --nocapture
       - name: Prove bounded Identity-H ToUnicode bfchar/bfrange and missing-CMap denial
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::cid_identity_h -- --nocapture
+      - name: Reject compressed PDF page exceeding decoded 8-MiB budget
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::cid_page_decompression_budget_fails_closed -- --nocapture
       - name: Generate a minimal real PDF with provisioned local fonts
         env:
           SHIVA_FONT_DIR: ${{ github.workspace }}/lib/fonts
