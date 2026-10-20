@@ -162,7 +162,7 @@ fn checked_page_content(pdf: &PdfDocument, page_id: ObjectId) -> anyhow::Result<
             .ok_or_else(|| anyhow::anyhow!("PDF decoded page byte budget exceeded"))?;
         anyhow::ensure!(remaining > 0, "PDF decoded page byte budget exceeded");
         // Reserve one byte for the newline separator between page streams.
-        let decoded = stream.decompressed_content_with_limit(remaining - 1)?;
+        let decoded = stream.get_plain_content_with_limit(remaining - 1)?;
         anyhow::ensure!(
             decoded.len() < remaining,
             "PDF decoded page byte budget exceeded"
