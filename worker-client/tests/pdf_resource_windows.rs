@@ -1,6 +1,6 @@
 // Separate Windows OS-process experiment; ignored outside dedicated CI.
 // It does not enable PDF in the actual shiva-worker format allowlist.
-#![cfg(all(windows, debug_assertions))]
+#![cfg(all(windows, debug_assertions, feature = "qa-pdf-windows"))]
 
 #[test]
 #[ignore = "requires hosted Windows CI with an exact LPAC SID ACL fixture"]
