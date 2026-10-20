@@ -27,7 +27,7 @@ The generated in-memory PDF corpus checks:
 - Valid two-page text cardinality and original ordering.
 - Valid nested page tree and inherited `/Resources`.
 - Root and nested `/Count` mismatch; wrong leaf parent; missing/non-reference/wrong-type kid.
-- Duplicate leaf; duplicated indirect shared branch/array; self-cycle.
+- Duplicate leaf; **two distinct branches sharing one indirect `/Kids` array**; cyclic indirect `/Kids` reference; valid indirect array; self-cycle.
 - Root leaf typed `/Page` instead of `/Pages`; zero-page tree.
 - Depth and declared-count limits.
 
