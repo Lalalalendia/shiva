@@ -88,7 +88,7 @@ jobs:
           Write-Host 'SHIVA_WIN_PDF_EXACT_LPAC_ACL=pass'
       - name: Run synthetic PDFs in real attested AppContainer and bounded Job
         run: |
-          $output = & cargo test -p shiva-worker-client --test pdf_resource_windows -- --ignored --nocapture 2>&1
+          $output = & cargo test -p shiva-worker-client --features qa-pdf-windows --test pdf_resource_windows -- --ignored --nocapture 2>&1
           $status = $LASTEXITCODE
           $text = $output -join "`n"
           $output | ForEach-Object { Write-Host $_ }
