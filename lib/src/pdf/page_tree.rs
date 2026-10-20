@@ -122,24 +122,16 @@ pub(super) fn validate_page_tree(pdf: &PdfDocument) -> Result<Vec<ObjectId>> {
                         });
                         // Reverse push yields exact original /Kids order.
                         for kid in kids.iter().rev() {
-                            let id = kid.as_reference().map_err(|_| {
+                            let child_id = kid.as_reference().map_err(|_| {
                                 anyhow::anyhow!(
                                     "PDF /Kids must contain indirect /Page or /Pages references"
                                 )
                             })?;
                             steps.push(Step::Visit {
-                                id,
-                                parent: Some(id_for_parent_placeholder()),
+                                id: child_id,
+                                parent: Some(id),
                                 depth: child_depth,
                             });
-                        }
-                        // The parent's id is already known; assign it without
-                        // deriving identity from any recovered traversal.
-                        let child_count = kids.len();
-                        for step in steps.iter_mut().rev().take(child_count) {
-                            if let Step::Visit { parent, .. } = step {
-                                *parent = Some(id);
-                            }
                         }
                     }
                     _ => bail!("PDF page-tree node has invalid /Type"),
@@ -152,8 +144,3 @@ pub(super) fn validate_page_tree(pdf: &PdfDocument) -> Result<Vec<ObjectId>> {
     Ok(result)
 }
 
-// Kept non-panicking and eliminated by assignment of every child frame above.
-// This deliberately cannot refer to a real PDF object id.
-fn id_for_parent_placeholder() -> ObjectId {
-    (u32::MAX, u16::MAX)
-}
