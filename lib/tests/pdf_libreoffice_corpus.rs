@@ -49,8 +49,14 @@ fn assert_source_text(output: &str, pages: usize, unicode: bool) {
             },
         ];
         for line in &lines {
-            let offset = output[cursor..].find(line)
-                .expect("synthetic DOCX source text missing or out of page order");
+            let offset = output[cursor..].find(line).unwrap_or_else(|| {
+                panic!(
+                    "synthetic QA PDF text missing or reordered: page={page}, expected={line:?}, \
+                     occurrences={}, first_position={:?}, cursor={}, extracted_bytes={}, prefix={:?}",
+                    output.matches(line).count(), output.find(line), cursor, output.len(),
+                    output.chars().take(240).collect::<String>()
+                )
+            });
             cursor += offset + line.len();
         }
         for line in &lines[..3] {
