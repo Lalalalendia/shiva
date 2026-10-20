@@ -5,7 +5,7 @@ use anyhow;
 use bytes::Bytes;
 use log::{debug, warn};
 use lopdf::content::Content;
-use lopdf::encodings::Encoding;
+use lopdf::Encoding;
 use lopdf::{Document as PdfDocument, LoadOptions, Object, ObjectId};
 use std::collections::BTreeMap;
 use typst::{eval::Tracer, foundations::Smart};
@@ -207,7 +207,7 @@ fn parse_page(
             pdf_document, MAX_TOUNICODE_CMAP,
         )?;
         anyhow::ensure!(
-            !composite || matches!(encoding, Encoding::UnicodeMapEncoding(_)),
+            !composite || matches!(&encoding, Encoding::UnicodeMapEncoding(_)),
             "composite PDF font has no usable ToUnicode mapping"
         );
         encodings.insert(name, encoding);
