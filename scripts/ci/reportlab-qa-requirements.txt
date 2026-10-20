@@ -1,0 +1,3 @@
+# QA-only PDF generator, never a shipping Shiva or Akula dependency.
+# ReportLab 4.4.10 universal wheel, SHA-256 verified from PyPI release metadata.
+reportlab==4.4.10 --hash=sha256:5abc815746ae2bc44e7ff25db96814f921349ca814c992c7eac3c26029bf7c24
