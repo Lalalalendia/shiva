@@ -1,0 +1,35 @@
+name: Shiva PDF OS resource QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/Cargo.toml'
+      - 'lib/examples/pdf_resource_probe.rs'
+      - 'scripts/ci/pdf-process-resource-probe.sh'
+      - '.github/workflows/pdf-process-resource.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/Cargo.toml'
+      - 'lib/examples/pdf_resource_probe.rs'
+      - 'scripts/ci/pdf-process-resource-probe.sh'
+      - '.github/workflows/pdf-process-resource.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-real-process:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build only the QA probe with PDF feature (NOT shiva-worker)
+        run: cargo build -p shiva --example pdf_resource_probe --no-default-features --features pdf,markdown,html,xml
+      - name: Enforce process CPU, address-space, wall-time and RSS bounds
+        run: bash ./scripts/ci/pdf-process-resource-probe.sh "$GITHUB_WORKSPACE/target/debug/examples/pdf_resource_probe"
