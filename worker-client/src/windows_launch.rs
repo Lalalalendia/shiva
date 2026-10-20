@@ -565,7 +565,7 @@ pub(crate) fn spawn(executable: &Path, args: &[String], pinned_image: &File) -> 
 }
 /// CI-only QA: exercise the real Windows LPAC+Job launcher on a synthetic
 /// PDF probe. Never add PDF to the shipping worker's format allowlist.
-#[cfg(debug_assertions)]
+#[cfg(all(debug_assertions, feature = "qa-pdf-windows"))]
 pub fn windows_pdf_resource_qa(executable: &Path) -> io::Result<(usize, usize)> {
     let hash = super::binary_blake3(executable)
         .map_err(|e| io::Error::other(format!("QA image hash: {e:?}")))?;
