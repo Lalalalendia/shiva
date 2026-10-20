@@ -86,6 +86,12 @@ fn verify_chromium_pdf(root: &Path, name: &str, pages: usize, unicode: bool) {
             pages,
             "Chrome Cyrillic text disappeared or duplicated"
         );
+    } else {
+        assert_eq!(
+            output.matches("INDEPENDENT-CHROME-PDF-WRITER").count(),
+            pages,
+            "Chrome non-Unicode body text disappeared or duplicated"
+        );
     }
     println!("SHIVA_CHROMIUM_TEXT_ORDER=pass;name={name};pages={pages};unicode={unicode}");
 }
