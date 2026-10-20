@@ -248,6 +248,66 @@ fn hostile_unknown_stream_filter_fails_closed() -> anyhow::Result<()> {
 }
 
 #[test]
+fn hostile_corrupt_flate_stream_fails_closed() -> anyhow::Result<()> {
+    // A /Filter name can be syntactically valid while its compressed
+    // bytes are invalid. Never treat raw data as indexed PDF operators.
+    let bytes = fixture(
+        FixtureFont::Type1,
+        latin_ops(vec![Object::string_literal("NeverIndexRawDeflate")]),
+        false,
+    )?;
+    let mut doc = LopdfDocument::load_mem(&bytes)?;
+    let page_id = *doc.get_pages().values().next().unwrap();
+    let stream_id = *doc.get_page_contents(page_id).first().unwrap();
+    let stream = doc.get_object_mut(stream_id)?.as_stream_mut()?;
+    stream.set_content(vec![0, 0, 0, 0, 0, 0, 0]);
+    stream.dict.set("Filter", "FlateDecode");
+    let mut broken = Vec::new();
+    doc.save_to(&mut broken)?;
+    Transformer::parse(&Bytes::from(broken))
+        .expect_err("corrupt FlateDecode bytes must be rejected");
+    Ok(())
+}
+
+#[test]
+fn hostile_mixed_contents_array_member_fails_closed() -> anyhow::Result<()> {
+    // lopdf's get_page_contents filters away non-reference array items.
+    // The whole page must fail rather than appear partially extracted.
+    let bytes = fixture(
+        FixtureFont::Type1,
+        latin_ops(vec![Object::string_literal("NeverPartiallyIndex")]),
+        false,
+    )?;
+    let mut doc = LopdfDocument::load_mem(&bytes)?;
+    let page_id = *doc.get_pages().values().next().unwrap();
+    let stream_id = *doc.get_page_contents(page_id).first().unwrap();
+    let page = doc.get_object_mut(page_id)?.as_dict_mut()?;
+    page.set("Contents", Object::Array(vec![
+        Object::Reference(stream_id), Object::Integer(123),
+    ]));
+    let mut broken = Vec::new();
+    doc.save_to(&mut broken)?;
+    Transformer::parse(&Bytes::from(broken))
+        .expect_err("non-stream member in /Contents must not be silently ignored");
+    Ok(())
+}
+
+#[test]
+fn hostile_control_valid_blank_page_without_contents() -> anyhow::Result<()> {
+    // A page genuinely lacking /Contents is a valid blank PDF page.
+    let bytes = fixture(FixtureFont::NoFont, vec![], false)?;
+    let mut doc = LopdfDocument::load_mem(&bytes)?;
+    let page_id = *doc.get_pages().values().next().unwrap();
+    doc.get_object_mut(page_id)?.as_dict_mut()?.remove(b"Contents");
+    let mut blank = Vec::new();
+    doc.save_to(&mut blank)?;
+    let extracted = Transformer::parse(&Bytes::from(blank))?;
+    let output = format!("{extracted:?}");
+    assert!(!output.contains("Never"), "blank page unexpectedly contains text");
+    Ok(())
+}
+
+#[test]
 fn hostile_truncated_document_fails_closed() {
     let bytes = Bytes::from_static(b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\n");
     assert!(
