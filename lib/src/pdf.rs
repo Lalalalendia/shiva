@@ -830,3 +830,7 @@ end"#;
         std::fs::write("test/data/test.pdf", output_bytes).unwrap();
     }
 }
+
+// Security QA uses deterministic malformed PDFs kept out of release code.
+#[cfg(test)]
+mod hostile_tests;
