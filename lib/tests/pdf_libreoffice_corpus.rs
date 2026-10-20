@@ -96,3 +96,109 @@ fn libreoffice_writer_export_preserves_full_source_lines_page_order_and_unicode(
     assert_eq!(checked_pages, 9);
     println!("SHIVA_LO_FIDELITY=pass;profiles=3;pages=9;source_lines=36");
 }
+
+
+/// 0x01 is a legitimate font code. Its meaning comes from /ToUnicode;
+/// LibreOffice uses 0x01 for 'L'. Treating it as a list token fragments
+/// later lines even when the PDF's whole source text is intact.
+#[test]
+fn pdf_code_0x01_is_a_valid_unicode_glyph_not_a_list_item() {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{dictionary, Document as LopdfDocument, Object, Stream, StringFormat};
+    use shiva::core::Element;
+
+    const CMAP: &[u8] = b"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+2 beginbfchar
+<01> <004C>
+<02> <004F>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end";
+
+    let mut pdf = LopdfDocument::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let cmap_id = pdf.add_object(Stream::new(dictionary! {}, CMAP.to_vec()));
+    let font_id = pdf.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "ToUnicode" => cmap_id,
+    });
+    let resources_id = pdf.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let glyph_line = || {
+        Operation::new("TJ", vec![Object::Array(vec![
+            Object::String(vec![1], StringFormat::Hexadecimal),
+            Object::String(vec![2], StringFormat::Hexadecimal),
+        ])])
+    };
+    let operations = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+        glyph_line(),
+        Operation::new("ET", vec![]),
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+        glyph_line(),
+        Operation::new("ET", vec![]),
+    ];
+    let stream_id = pdf.add_object(Stream::new(
+        dictionary! {},
+        Content { operations }.encode().expect("test PDF content encoding"),
+    ));
+    let page_id = pdf.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Contents" => stream_id,
+        "Resources" => resources_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    });
+    pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+        "Type" => "Pages",
+        "Kids" => vec![page_id.into()],
+        "Count" => 1,
+    }));
+    let catalog_id = pdf.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    pdf.trailer.set("Root", catalog_id);
+    let mut raw = Vec::new();
+    pdf.save_to(&mut raw).expect("save deterministic PDF fixture");
+    let document = Transformer::parse(&Bytes::from(raw))
+        .expect("valid ToUnicode source PDF must extract");
+    let mut flattened = String::new();
+    for band in &document.bands {
+        for element in band.elements() {
+            match element {
+                Element::Text { text, .. } => flattened.push_str(text),
+                Element::Paragraph { elements } => {
+                    for sub in elements {
+                        match sub {
+                            Element::Text { text, .. } => flattened.push_str(text),
+                            _ => panic!("unexpected nested PDF text element"),
+                        }
+                    }
+                }
+                Element::List { .. } => panic!("glyph byte 0x01 became a phantom list"),
+                _ => panic!("unexpected PDF output element"),
+            }
+        }
+    }
+    assert_eq!(
+        flattened.matches("LO").count(), 2,
+        "both repeated source lines must be emitted contiguously"
+    );
+    println!("SHIVA_PDF_0X01_CMAP=pass;decoded_lines=2");
+}
