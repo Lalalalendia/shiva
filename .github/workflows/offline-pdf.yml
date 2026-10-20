@@ -38,6 +38,8 @@ jobs:
       # Cargo unit tests run with lib/ as their working directory, so use an absolute path.
       - name: Reject duplicated text across two PDF content streams
         run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::multi_stream_page_does_not_duplicate_extracted_text -- --nocapture
+      - name: Prove bounded Identity-H ToUnicode bfchar/bfrange and missing-CMap denial
+        run: cargo test -p shiva --no-default-features --features pdf,markdown,html,xml --lib pdf::tests::cid_identity_h -- --nocapture
       - name: Generate a minimal real PDF with provisioned local fonts
         env:
           SHIVA_FONT_DIR: ${{ github.workspace }}/lib/fonts
