@@ -92,19 +92,34 @@ fn exactly_all_original_text_pages(output: &str, seed: &Seed, mutation: &str) {
     }
 }
 
-fn parse_with_oracle(bytes: Vec<u8>, seed: &Seed, mutation: &str) -> bool {
-    // A parser panic is a *test failure*, not an acceptable reject.
+fn parse_with_oracle(
+    bytes: Vec<u8>,
+    seed: &Seed,
+    mutation: &str,
+    expected_complete: Option<&str>,
+) -> Option<String> {
+    // A parser panic is a test failure, never a successful rejection.
     let parsed = catch_unwind(AssertUnwindSafe(|| {
         Transformer::parse(&Bytes::from(bytes))
     }))
     .unwrap_or_else(|_| panic!("PDF mutation caused parser panic: {} {mutation}", seed.name));
 
     match parsed {
-        Err(_) => false, // Explicit rejection is acceptable.
+        Err(_) => None, // Explicit rejection is acceptable.
         Ok(doc) => {
             let output = format!("{doc:?}");
             exactly_all_original_text_pages(&output, seed, mutation);
-            true
+            if let Some(expected) = expected_complete {
+                // Required graph-key mutations cannot alter original body text.
+                // Page markers alone miss deleted words inside intact pages.
+                // Never print document contents in CI if the comparison fails.
+                assert!(
+                    output == expected,
+                    "PDF semantic text drift after {mutation} in {} despite intact page markers",
+                    seed.name
+                );
+            }
+            Some(output)
         }
     }
 }
@@ -135,10 +150,9 @@ fn mutated_required_page_graph_cannot_silently_lose_text_pages() {
 
     for seed in SEEDS {
         let original = seed_bytes(seed, &pdf_lib, &reportlab);
-        assert!(
-            parse_with_oracle(original.clone(), seed, "unmodified baseline"),
-            "known-good independent PDF seed must parse"
-        );
+        let baseline = parse_with_oracle(
+            original.clone(), seed, "unmodified baseline", None,
+        ).expect("known-good independent PDF seed must parse");
         for token in REQUIRED_GRAPH_TOKENS {
             for start in positions(&original, token) {
                 let mut altered = original.clone();
@@ -149,7 +163,7 @@ fn mutated_required_page_graph_cannot_silently_lose_text_pages() {
                     "key-token-{}-at-{}", String::from_utf8_lossy(token), start
                 );
                 candidates += 1;
-                if parse_with_oracle(altered, seed, &description) {
+                if parse_with_oracle(altered, seed, &description, Some(&baseline)).is_some() {
                     accepted_complete += 1;
                 } else {
                     rejected += 1;
@@ -169,7 +183,7 @@ fn mutated_required_page_graph_cannot_silently_lose_text_pages() {
                 altered[cursor] = if altered[cursor] == b'9' { b'8' } else { b'9' };
                 candidates += 1;
                 let description = format!("count-digit-at-{cursor}");
-                if parse_with_oracle(altered, seed, &description) {
+                if parse_with_oracle(altered, seed, &description, Some(&baseline)).is_some() {
                     accepted_complete += 1;
                 } else {
                     rejected += 1;
