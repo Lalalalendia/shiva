@@ -5,15 +5,38 @@ use anyhow;
 use bytes::Bytes;
 use log::{debug, warn};
 use lopdf::content::Content;
-use lopdf::{Document as PdfDocument, Object, ObjectId};
+use lopdf::Encoding;
+use lopdf::{Document as PdfDocument, LoadOptions, Object, ObjectId};
 use std::collections::BTreeMap;
 use typst::{eval::Tracer, foundations::Smart};
 
 pub struct Transformer;
+
+// Standalone library QA limits, not permission to enable PDF in the worker.
+// These bounds cover the input file, eager load-time stream decoding,
+// individual fonts' CMaps and each page's combined uncompressed content.
+// Process CPU, total allocations and document output budgets still need a
+// separate sandbox gate before any Akula integration.
+const MAX_PDF_INPUT: usize = 64 * 1024 * 1024;
+const MAX_DECOMPRESSED_STREAM: usize = 8 * 1024 * 1024;
+const MAX_TOUNICODE_CMAP: usize = 1024 * 1024;
+const MAX_PDF_PAGES: usize = 1024;
+
 impl TransformerTrait for Transformer {
     fn parse(document: &Bytes) -> anyhow::Result<Document> {
         let mut elements: Vec<Element> = Vec::new();
-        let pdf_document = PdfDocument::load_mem(document)?;
+        anyhow::ensure!(
+            document.len() <= MAX_PDF_INPUT,
+            "PDF input exceeds standalone parser byte limit"
+        );
+        let pdf_document = PdfDocument::load_mem_with_options(
+            document,
+            LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
+        )?;
+        anyhow::ensure!(
+            pdf_document.get_pages().len() <= MAX_PDF_PAGES,
+            "PDF page count exceeds standalone parser limit"
+        );
         for (_page_number, page_id) in pdf_document.get_pages() {
             // get_page_content() already joins the page's /Contents streams.
             // Parsing it once PER stream repeats every page's text N times.
@@ -65,7 +88,7 @@ fn parse_page(
 ) -> anyhow::Result<()> {
     fn collect_text(
         text: &mut String,
-        encoding: Option<&str>,
+        encoding: &Encoding<'_>,
         operands: &[Object],
         elements: &mut Vec<Element>,
     ) -> anyhow::Result<()> {
@@ -73,7 +96,13 @@ fn parse_page(
             debug!("2 {:?}", operand);
             match *operand {
                 Object::String(ref bytes, _) => {
-                    let decoded_text = PdfDocument::decode_text(encoding, bytes);
+                    let decoded_text = PdfDocument::decode_text(encoding, bytes)?;
+                    // A missing CID code would otherwise become U+FFFD and
+                    // risk publishing corrupted tokens as "Complete" text.
+                    anyhow::ensure!(
+                        !decoded_text.contains('\u{FFFD}'),
+                        "PDF glyph could not be mapped to Unicode"
+                    );
                     text.push_str(&decoded_text);
                     if bytes.len() == 1 && bytes[0] == 1 {
                         match elements.last() {
@@ -150,7 +179,7 @@ fn parse_page(
                     }
                 }
                 Object::Array(ref arr) => {
-                    let _ = collect_text(text, encoding, arr, elements);
+                    collect_text(text, encoding, arr, elements)?;
                     text.push(' ');
                 }
                 Object::Integer(i) => {
@@ -165,13 +194,30 @@ fn parse_page(
     }
     let mut text = String::new();
 
-    let fonts = pdf_document.get_page_fonts(page_id);
-    let encodings = fonts
-        .into_iter()
-        .map(|(name, font)| (name, font.get_font_encoding()))
-        .collect::<BTreeMap<Vec<u8>, &str>>();
+    let fonts = pdf_document.get_page_fonts(page_id)?;
+    let mut encodings = BTreeMap::new();
+    for (name, font) in fonts {
+        // Don't silently fall back to a Latin single-byte encoding for
+        // composite CID fonts. They require a real ToUnicode CMap.
+        let composite = font.get(b"Subtype")
+            .and_then(Object::as_name)
+            .map(|name| name == b"Type0")
+            .unwrap_or(false);
+        let encoding = font.get_font_encoding_with_limit(
+            pdf_document, MAX_TOUNICODE_CMAP,
+        )?;
+        anyhow::ensure!(
+            !composite || matches!(&encoding, Encoding::UnicodeMapEncoding(_)),
+            "composite PDF font has no usable ToUnicode mapping"
+        );
+        encodings.insert(name, encoding);
+    }
 
-    let vec = pdf_document.get_page_content(page_id)?;
+    // The bounded variant is essential: page /Contents can include many
+    // individually compressed streams, each contributing to decompression.
+    let vec = pdf_document.get_page_content_with_limit(
+        page_id, MAX_DECOMPRESSED_STREAM,
+    )?;
     let content = Content::decode(&vec)?;
     let mut current_encoding = None;
     for operation in &content.operations {
@@ -217,10 +263,15 @@ fn parse_page(
                     .first()
                     .ok_or(ParserError::Common)?
                     .as_name()?;
-                current_encoding = encodings.get(current_font).cloned();
+                current_encoding = Some(
+                    encodings.get(current_font)
+                        .ok_or_else(|| anyhow::anyhow!("PDF text references an unknown font"))?
+                );
             }
             "Tj" | "TJ" => {
-                _ = collect_text(&mut text, current_encoding, &operation.operands, elements);
+                let encoding = current_encoding
+                    .ok_or_else(|| anyhow::anyhow!("PDF text without a usable font"))?;
+                collect_text(&mut text, encoding, &operation.operands, elements)?;
             }
             "ET" => {
                 if !text.ends_with('\n') {
@@ -291,8 +342,9 @@ fn parse_page(
 #[cfg(test)]
 mod tests {
     use crate::core::*;
-    use crate::pdf::Transformer;
+    use crate::pdf::{Transformer, MAX_DECOMPRESSED_STREAM};
     use crate::{markdown, pdf};
+    use lopdf::LoadOptions;
     use bytes::Bytes;
     use log::{debug, info};
     use std::collections::HashMap;
@@ -419,6 +471,176 @@ mod tests {
         let flattened = format!("{parsed:?}");
         assert_eq!(flattened.matches("AlphaUnique").count(), 1, "{flattened}");
         assert_eq!(flattened.matches("BetaUnique").count(), 1, "{flattened}");
+        Ok(())
+    }
+
+
+    // A minimal Type0/Identity-H page containing explicit UTF-16BE CMap
+    // mappings. These are character codes, NOT UTF-8 glyph bytes.
+    // This fixture exercises both beginbfchar and beginbfrange.
+    fn cid_identity_h_fixture(with_cmap: bool, code_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream, StringFormat};
+
+        const CMAP: &str = r#"/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+2 beginbfchar
+<0001> <041F>
+<0002> <0440>
+endbfchar
+1 beginbfrange
+<0003> <0004> <4E16>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end"#;
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let cmap_id = pdf.add_object(Stream::new(dictionary! {}, CMAP.as_bytes().to_vec()));
+        let mut font = dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type0",
+            "BaseFont" => "FixtureCIDFont",
+            "Encoding" => "Identity-H",
+        };
+        if with_cmap {
+            font.set("ToUnicode", Object::Reference(cmap_id));
+        }
+        let font_id = pdf.add_object(font);
+        let resources_id = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+
+        // U+041F (П), U+0440 (р), U+4E16 (世), U+4E17 (丗).
+        // Identity-H means TWO bytes per glyph code.
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                Operation::new("Tj", vec![Object::String(
+                    code_bytes.to_vec(),
+                    StringFormat::Hexadecimal,
+                )]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let stream_id = pdf.add_object(Stream::new(dictionary! {}, content.encode()?));
+        let page_id = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => resources_id,
+            "Contents" => stream_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }));
+        let catalog_id = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog_id);
+        let mut output = Vec::new();
+        pdf.save_to(&mut output)?;
+        Ok(output)
+    }
+
+    #[test]
+    fn cid_identity_h_tounicode_preserves_unicode() -> anyhow::Result<()> {
+        let bytes = cid_identity_h_fixture(true, &[0, 1, 0, 2, 0, 3, 0, 4])?;
+        let parsed = Transformer::parse(&Bytes::from(bytes))?;
+        let output = format!("{parsed:?}");
+        assert!(output.contains("Пр世丗"), "ToUnicode output lost Cyrillic/CJK: {output}");
+        assert_eq!(output.matches("Пр世丗").count(), 1, "duplicated text: {output}");
+        assert!(!output.contains('\u{FFFD}'), "Unicode replacement leaked into parsed text");
+        Ok(())
+    }
+
+    #[test]
+    fn cid_identity_h_without_cmap_fails_closed() -> anyhow::Result<()> {
+        let bytes = cid_identity_h_fixture(false, &[0, 1, 0, 2, 0, 3, 0, 4])?;
+        let result = Transformer::parse(&Bytes::from(bytes));
+        assert!(result.is_err(), "CID text without ToUnicode must never look Complete");
+        Ok(())
+    }
+
+    #[test]
+    fn cid_identity_h_unmapped_glyph_fails_closed() -> anyhow::Result<()> {
+        let bytes = cid_identity_h_fixture(true, &[0, 1, 0, 9])?;
+        let err = Transformer::parse(&Bytes::from(bytes))
+            .expect_err("unmapped CID must not be silently indexed");
+        assert!(
+            err.to_string().contains("glyph could not be mapped"),
+            "unexpected missing-CID error: {err}"
+        );
+        Ok(())
+    }
+
+    /// The combined uncompressed page budget applies even if the PDF bytes
+    /// contain a tiny Flate-compressed stream. The negative must fail because
+    /// of the decompression ceiling, not because the PDF was malformed.
+    #[test]
+    fn cid_page_decompression_budget_fails_closed() -> anyhow::Result<()> {
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let mut stream = Stream::new(
+            dictionary! {},
+            vec![b' '; MAX_DECOMPRESSED_STREAM + 512],
+        );
+        stream.compress()?;
+        let stream_id = pdf.add_object(stream);
+        let page_id = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => dictionary! {},
+            "Contents" => stream_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }));
+        let catalog_id = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog_id);
+        let mut output = Vec::new();
+        pdf.save_to(&mut output)?;
+        assert!(
+            output.len() < MAX_DECOMPRESSED_STREAM / 2,
+            "fixture should remain small on disk and inflate past the limit"
+        );
+
+        let loaded = LopdfDocument::load_mem_with_options(
+            &output,
+            LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
+        )?;
+        let err = loaded
+            .get_page_content_with_limit(page_id, MAX_DECOMPRESSED_STREAM)
+            .expect_err("page must exceed combined uncompressed budget");
+        assert!(
+            format!("{err:?}").contains("MemoryLimitExceeded"),
+            "unexpected rejection: {err:?}"
+        );
+        assert!(
+            Transformer::parse(&Bytes::from(output)).is_err(),
+            "Shiva must reject an oversized decoded PDF page"
+        );
         Ok(())
     }
 
