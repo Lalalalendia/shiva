@@ -48,8 +48,9 @@ def validate_manifest(data):
             raise ValueError("PDF fixture size outside QA limits")
         total += expected
         if (not re.fullmatch(r"[0-9a-f]{40}", entry["git_blob_sha1"])
+                or not re.fullmatch(r"[0-9a-f]{64}", entry.get("sha256", ""))
                 or entry["oracle"] not in ALLOWED_ORACLES):
-            raise ValueError("unverified PDF blob identity or oracle")
+            raise ValueError("unverified PDF SHA-1/SHA-256 or oracle")
     if total > MAX_CORPUS_BYTES:
         raise ValueError("total PDF corpus exceeds QA fetch budget")
     return origin, entries
@@ -64,8 +65,7 @@ def checked_bytes(payload, entry):
     if git_sha != entry["git_blob_sha1"]:
         raise ValueError("PDF fixture differs from pinned upstream Git blob")
     digest = hashlib.sha256(payload).hexdigest()
-    pinned_sha256 = entry.get("sha256")
-    if pinned_sha256 is not None and digest != pinned_sha256:
+    if digest != entry["sha256"]:
         raise ValueError("PDF SHA-256 mismatch")
     return digest
 
