@@ -203,6 +203,30 @@ fn hostile_dangling_contents_reference_fails_closed() -> anyhow::Result<()> {
 }
 
 #[test]
+fn hostile_unknown_stream_filter_fails_closed() -> anyhow::Result<()> {
+    // lopdf's get_page_content_with_limit() can fall back to compressed
+    // raw bytes on decode errors; Shiva must reject instead.
+    let bytes = fixture(
+        FixtureFont::Type1,
+        latin_ops(vec![Object::string_literal("NotIndexable")]),
+        false,
+    )?;
+    let mut doc = LopdfDocument::load_mem(&bytes)?;
+    let page_id = *doc.get_pages().values().next()
+        .expect("fixture must contain one page");
+    let stream_id = *doc.get_page_contents(page_id).first()
+        .expect("fixture must contain one content stream");
+    let stream = doc.get_object_mut(stream_id)?.as_stream_mut()?;
+    stream.dict.set("Filter", "DeliberatelyUnknownFilter");
+    let mut broken = Vec::new();
+    doc.save_to(&mut broken)?;
+
+    Transformer::parse(&Bytes::from(broken))
+        .expect_err("unsupported PDF filter must not fall back to raw data");
+    Ok(())
+}
+
+#[test]
 fn hostile_truncated_document_fails_closed() {
     let bytes = Bytes::from_static(b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\n");
     assert!(
