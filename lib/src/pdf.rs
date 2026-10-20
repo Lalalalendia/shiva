@@ -651,6 +651,60 @@ end"#;
         Ok(())
     }
 
+    #[test]
+    fn total_budget_rejects_unicode_output_across_two_pages() -> anyhow::Result<()> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream, StringFormat};
+
+        const CHARS_PER_PAGE: usize = 5 * 1024 * 1024;
+        assert!(CHARS_PER_PAGE * 2 > MAX_PDF_TOTAL_TEXT);
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let font_id = pdf.add_object(dictionary! {
+            "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica",
+        });
+        let resources_id = pdf.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let mut page_ids = Vec::new();
+        for _ in 0..2 {
+            let ops = Content { operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+                Operation::new("Tj", vec![Object::String(
+                    vec![b'A'; CHARS_PER_PAGE], StringFormat::Literal,
+                )]),
+                Operation::new("ET", vec![]),
+            ] };
+            let mut stream = Stream::new(dictionary! {}, ops.encode()?);
+            stream.compress()?;
+            let contents = pdf.add_object(stream);
+            let page_id = pdf.add_object(dictionary! {
+                "Type" => "Page", "Parent" => pages_id,
+                "Contents" => contents, "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id);
+        }
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+            "Count" => 2,
+        }));
+        let catalog = pdf.add_object(dictionary! {
+            "Type" => "Catalog", "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog);
+        let mut bytes = Vec::new();
+        pdf.save_to(&mut bytes)?;
+        assert!(bytes.len() < 1_000_000, "fixture must be highly compressed");
+        let err = Transformer::parse(&Bytes::from(bytes))
+            .expect_err("two individually acceptable pages exceed global output budget");
+        assert!(err.to_string().contains("PDF cumulative text budget"),
+            "output text must be rejected by the global limit: {err}");
+        Ok(())
+    }
+
     /// Repeated text matrix operators must append in source order without
     /// cloning all preceding paragraph children at every step.
     #[test]
