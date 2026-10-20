@@ -20,6 +20,7 @@ This is a security regression **experiment for the standalone Shiva PDF library*
 | `Tf` operand is an integer, not a named font | Error, not Complete | No silent font fallback |
 | Text uses undeclared font `F1` | Error, not Complete | No implicit encoding |
 | Page `/Contents` references missing object | Error, not Complete | No silently empty index on broken page |
+| Unsupported `/Contents` stream compression filter | Error, not Complete | Prevent raw-compressed-byte fallback |
 | Truncated PDF without valid xref/page tree | Error, not Complete | Invalid input should not appear indexable |
 
 All fixtures are built from a valid PDF document/page/catalog, except the explicitly truncated case. They contain synthetic text only, no external resources or executable content. For each negative case, a returned `Ok(Document)` is a **test failure**. Panic or unbounded execution also fails CI. Assertions deliberately avoid printing the document's extracted text or bytes into CI logs.
