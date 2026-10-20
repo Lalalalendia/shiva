@@ -1,0 +1,80 @@
+name: Shiva PDF Coverage-Guided Fuzz QA
+
+on:
+  pull_request:
+    paths:
+      - 'fuzz/**'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - 'scripts/ci/prepare-pdf-fuzz-corpus.py'
+      - 'scripts/ci/generate-reportlab-pdf-corpus.py'
+      - 'scripts/ci/fetch-pinned-pdf-corpus.py'
+      - 'scripts/ci/pinned-pdf-corpus-manifest.json'
+      - '.github/workflows/pdf-libfuzzer-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'fuzz/**'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - 'scripts/ci/prepare-pdf-fuzz-corpus.py'
+      - 'scripts/ci/generate-reportlab-pdf-corpus.py'
+      - 'scripts/ci/fetch-pinned-pdf-corpus.py'
+      - 'scripts/ci/pinned-pdf-corpus-manifest.json'
+      - '.github/workflows/pdf-libfuzzer-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-libfuzzer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned cargo-fuzz runner
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Install pinned ReportLab generator and verified dependencies
+        run: |
+          python -m pip install --only-binary=:all: pillow==11.3.0 charset-normalizer==3.4.3
+          python -m pip install --no-deps --only-binary=:all: --require-hashes -r scripts/ci/reportlab-qa-requirements.txt
+          python -m pip check
+      - name: Download exact CC0 PDF seeds
+        run: |
+          python scripts/ci/fetch-pinned-pdf-corpus.py --manifest scripts/ci/pinned-pdf-corpus-manifest.json --out "$RUNNER_TEMP/shiva-pdf-lib"
+      - name: Generate SHA-verified independent ReportLab PDF seeds
+        run: |
+          python scripts/ci/generate-reportlab-pdf-corpus.py --out "$RUNNER_TEMP/shiva-reportlab"
+      - name: Stage five real PDFs and 72 semantic instructions
+        run: |
+          python scripts/ci/prepare-pdf-fuzz-corpus.py --pdf-lib "$RUNNER_TEMP/shiva-pdf-lib" --reportlab "$RUNNER_TEMP/shiva-reportlab" --corpus "$GITHUB_WORKSPACE/fuzz/corpus"
+      - name: Compile libFuzzer address-sanitized PDF targets
+        run: |
+          cargo +nightly fuzz build pdf_parse
+          cargo +nightly fuzz build pdf_required_graph
+      - name: Coverage-guided fuzzing on raw PDF parser bytes
+        run: |
+          timeout --signal=TERM --kill-after=10s 180s cargo +nightly fuzz run pdf_parse -- -runs=1000 -timeout=8 -rss_limit_mb=1024 -max_len=262144 -print_final_stats=1
+      - name: Coverage-guided fuzzing on required graph-key mutations
+        env:
+          SHIVA_QA_PINNED_PDF_DIR: ${{ runner.temp }}/shiva-pdf-lib
+          SHIVA_QA_REPORTLAB_DIR: ${{ runner.temp }}/shiva-reportlab
+        run: |
+          timeout --signal=TERM --kill-after=10s 180s cargo +nightly fuzz run pdf_required_graph -- -runs=2000 -timeout=8 -rss_limit_mb=1024 -max_len=16 -print_final_stats=1
+          echo "SHIVA_PDF_LIBFUZZER_QA=pass;raw=1000;semantic=2000;sources=2"
+      - name: Upload crash reproducers only if CI fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiva-pdf-libfuzzer-crashes-${{ github.sha }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
