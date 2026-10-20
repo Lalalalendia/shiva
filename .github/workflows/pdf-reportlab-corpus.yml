@@ -1,0 +1,80 @@
+name: Shiva Independent ReportLab PDF QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/tests/pdf_reportlab_corpus.rs'
+      - 'scripts/ci/generate-reportlab-pdf-corpus.py'
+      - 'scripts/ci/reportlab-qa-requirements.txt'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - '.github/workflows/pdf-reportlab-corpus.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/tests/pdf_reportlab_corpus.rs'
+      - 'scripts/ci/generate-reportlab-pdf-corpus.py'
+      - 'scripts/ci/reportlab-qa-requirements.txt'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - '.github/workflows/pdf-reportlab-corpus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  generated-reportlab-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install QA-only ReportLab with pinned version and wheel digest
+        run: |
+          python -m pip install --only-binary=:all: pillow==11.3.0 charset-normalizer==3.4.3
+          python -m pip install --no-deps --only-binary=:all: --require-hashes -r scripts/ci/reportlab-qa-requirements.txt
+          python -m pip check
+      - name: Generate independent ReportLab source pages
+        run: python scripts/ci/generate-reportlab-pdf-corpus.py --out "$RUNNER_TEMP/shiva-reportlab"
+      - name: Prove complete text on 16 pages, original order and rotations
+        env:
+          SHIVA_QA_REPORTLAB_DIR: ${{ runner.temp }}/shiva-reportlab
+        run: cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_reportlab_corpus -- --nocapture
+
+  generated-reportlab-windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install QA-only ReportLab with pinned version and wheel digest
+        run: |
+          python -m pip install --only-binary=:all: pillow==11.3.0 charset-normalizer==3.4.3
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned QA dependency installation failed' }
+          python -m pip install --no-deps --only-binary=:all: --require-hashes -r scripts/ci/reportlab-qa-requirements.txt
+          if ($LASTEXITCODE -ne 0) { throw 'ReportLab pinned SHA-256 gate failed' }
+          python -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'QA dependency compatibility failed' }
+      - name: Generate independent ReportLab source pages
+        run: |
+          $dest = Join-Path $env:RUNNER_TEMP 'shiva-reportlab'
+          python scripts/ci/generate-reportlab-pdf-corpus.py --out $dest
+          if ($LASTEXITCODE -ne 0) { throw 'ReportLab profile generation failed' }
+      - name: Prove complete text on 16 pages, original order and rotations
+        env:
+          SHIVA_QA_REPORTLAB_DIR: ${{ runner.temp }}/shiva-reportlab
+        run: |
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_reportlab_corpus -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'ReportLab PDF semantic gate failed' }
