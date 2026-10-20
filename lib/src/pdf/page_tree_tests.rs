@@ -146,6 +146,10 @@ fn tree_missing_kid_reference_rejected() -> Result<()> {
     let missing = f.pdf.new_object_id();
     f.pdf.get_object_mut(f.root)?.as_dict_mut()?
         .set("Kids", vec![f.first.into(), missing.into()]);
+    // Minimal falsifier: lopdf's lenient iterator gives one page even
+    // though the original root /Count demands two descendants. Shiva
+    // must never accept this silently shortened page list as Complete.
+    assert_eq!(f.pdf.get_pages().len(), 1);
     f.verify_rejected("")
 }
 
