@@ -477,7 +477,7 @@ mod tests {
     // A minimal Type0/Identity-H page containing explicit UTF-16BE CMap
     // mappings. These are character codes, NOT UTF-8 glyph bytes.
     // This fixture exercises both beginbfchar and beginbfrange.
-    fn cid_identity_h_fixture(with_cmap: bool) -> anyhow::Result<Vec<u8>> {
+    fn cid_identity_h_fixture(with_cmap: bool, code_bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         use lopdf::content::{Content, Operation};
         use lopdf::{dictionary, Document as LopdfDocument, Object, Stream, StringFormat};
 
@@ -526,7 +526,7 @@ end"#;
                 Operation::new("BT", vec![]),
                 Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
                 Operation::new("Tj", vec![Object::String(
-                    vec![0, 1, 0, 2, 0, 3, 0, 4],
+                    code_bytes.to_vec(),
                     StringFormat::Hexadecimal,
                 )]),
                 Operation::new("ET", vec![]),
@@ -557,7 +557,7 @@ end"#;
 
     #[test]
     fn cid_identity_h_tounicode_preserves_unicode() -> anyhow::Result<()> {
-        let bytes = cid_identity_h_fixture(true)?;
+        let bytes = cid_identity_h_fixture(true, &[0, 1, 0, 2, 0, 3, 0, 4])?;
         let parsed = Transformer::parse(&Bytes::from(bytes))?;
         let output = format!("{parsed:?}");
         assert!(output.contains("Пр世丗"), "ToUnicode output lost Cyrillic/CJK: {output}");
@@ -568,9 +568,78 @@ end"#;
 
     #[test]
     fn cid_identity_h_without_cmap_fails_closed() -> anyhow::Result<()> {
-        let bytes = cid_identity_h_fixture(false)?;
+        let bytes = cid_identity_h_fixture(false, &[0, 1, 0, 2, 0, 3, 0, 4])?;
         let result = Transformer::parse(&Bytes::from(bytes));
         assert!(result.is_err(), "CID text without ToUnicode must never look Complete");
+        Ok(())
+    }
+
+    #[test]
+    fn cid_identity_h_unmapped_glyph_fails_closed() -> anyhow::Result<()> {
+        let bytes = cid_identity_h_fixture(true, &[0, 1, 0, 9])?;
+        let err = Transformer::parse(&Bytes::from(bytes))
+            .expect_err("unmapped CID must not be silently indexed");
+        assert!(
+            err.to_string().contains("glyph could not be mapped"),
+            "unexpected missing-CID error: {err}"
+        );
+        Ok(())
+    }
+
+    /// The combined uncompressed page budget applies even if the PDF bytes
+    /// contain a tiny Flate-compressed stream. The negative must fail because
+    /// of the decompression ceiling, not because the PDF was malformed.
+    #[test]
+    fn cid_page_decompression_budget_fails_closed() -> anyhow::Result<()> {
+        use lopdf::{dictionary, Document as LopdfDocument, Object, Stream};
+
+        let mut pdf = LopdfDocument::with_version("1.5");
+        let pages_id = pdf.new_object_id();
+        let mut stream = Stream::new(
+            dictionary! {},
+            vec![b' '; MAX_DECOMPRESSED_STREAM + 512],
+        );
+        stream.compress()?;
+        let stream_id = pdf.add_object(stream);
+        let page_id = pdf.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Resources" => dictionary! {},
+            "Contents" => stream_id,
+            "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+        });
+        pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+            "Type" => "Pages",
+            "Kids" => vec![page_id.into()],
+            "Count" => 1,
+        }));
+        let catalog_id = pdf.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        pdf.trailer.set("Root", catalog_id);
+        let mut output = Vec::new();
+        pdf.save_to(&mut output)?;
+        assert!(
+            output.len() < MAX_DECOMPRESSED_STREAM / 2,
+            "fixture should remain small on disk and inflate past the limit"
+        );
+
+        let loaded = LopdfDocument::load_mem_with_options(
+            &output,
+            LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
+        )?;
+        let err = loaded
+            .get_page_content_with_limit(page_id, MAX_DECOMPRESSED_STREAM)
+            .expect_err("page must exceed combined uncompressed budget");
+        assert!(
+            format!("{err:?}").contains("MemoryLimitExceeded"),
+            "unexpected rejection: {err:?}"
+        );
+        assert!(
+            Transformer::parse(&Bytes::from(output)).is_err(),
+            "Shiva must reject an oversized decoded PDF page"
+        );
         Ok(())
     }
 
