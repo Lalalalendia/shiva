@@ -64,6 +64,12 @@ fn parse_request<R: Read>(reader: &mut R) -> Result<(SourceRevision, Vec<u8>), &
     Ok((source, bytes))
 }
 
+fn worker_format_allowed(format: &str) -> bool {
+    matches!(format, "txt" | "md" | "html")
+        || (cfg!(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))
+            && format == "pdf")
+}
+
 fn parse_document(format: &str, content: &[u8]) -> Result<Document, &'static str> {
     let source = Bytes::copy_from_slice(content);
     // No filesystem loader, network fetch, font resolution or user paths.
@@ -78,6 +84,11 @@ fn parse_document(format: &str, content: &[u8]) -> Result<Document, &'static str
             .map_err(|_| "markdown parser rejected input or external asset"),
         "html" => shiva::html::Transformer::parse_with_loader(&source, deny_asset)
             .map_err(|_| "HTML parser rejected input or external asset"),
+        // Laboratory only: the production/release worker never compiles
+        // an enabled PDF dispatcher, even with this feature selected.
+        #[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+        "pdf" => shiva::pdf::Transformer::parse(&source)
+            .map_err(|_| "PDF parser rejected input"),
         _ => Err("unsupported document format"),
     }
 }
@@ -185,7 +196,7 @@ fn failed<W: Write>(writer: &mut W, source: &SourceRevision, code: WarningCode, 
 /// caller-selected file descriptors are accepted as request fields.
 pub fn run<R: Read, W: Write>(mut input: R, mut output: W) -> Result<(), &'static str> {
     let (source, bytes) = parse_request(&mut input)?;
-    if !matches!(source.format.as_str(), "txt" | "md" | "html") {
+    if !worker_format_allowed(&source.format) {
         return failed(&mut output, &source, WarningCode::Unsupported, "Format disabled by worker policy");
     }
     let document = match std::panic::catch_unwind(|| parse_document(&source.format, &bytes)) {
@@ -307,10 +318,30 @@ mod tests {
         assert_eq!(frames.len(), 1, "must never emit a successful batch on error");
     }
 
+    #[cfg(not(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64")))]
     #[test]
     fn unsupported_pdf_fails_closed() {
         let frames = verify(b"%PDF-1.7", "pdf");
         assert!(matches!(frames.last().unwrap().message, Message::End { outcome: Outcome::Failed, .. }));
+    }
+
+    #[test]
+    fn policy_never_enables_docx_or_archives() {
+        assert!(!worker_format_allowed("docx"));
+        assert!(!worker_format_allowed("zip"));
+        assert!(!worker_format_allowed("PDF"));
+        assert_eq!(
+            worker_format_allowed("pdf"),
+            cfg!(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64")),
+        );
+    }
+
+    #[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn corrupt_pdf_fails_without_indexable_blocks() {
+        let frames = verify(b"%PDF-1.7\nnot a valid PDF", "pdf");
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(frames[0].message, Message::End { outcome: Outcome::Failed, .. }));
     }
 
     #[test]
