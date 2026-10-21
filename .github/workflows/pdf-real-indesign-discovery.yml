@@ -4,6 +4,10 @@ on:
   pull_request:
     paths:
       - 'scripts/ci/inspect-pinned-indesign-pdf.py'
+      - 'lib/tests/pdf_indesign_corpus.rs'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
       - '.github/workflows/pdf-real-indesign-discovery.yml'
   workflow_dispatch:
 
@@ -19,6 +23,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install independent bounded PDF provenance readers
         run: |
           sudo apt-get update -qq
@@ -29,6 +35,9 @@ jobs:
         run: |
           python -m py_compile scripts/ci/inspect-pinned-indesign-pdf.py
           python scripts/ci/inspect-pinned-indesign-pdf.py --out "$RUNNER_TEMP/shiva-real-indesign"
-      - name: Explicitly identify this job as discovery, not format admission
+      - name: Prove real InDesign source text in Shiva, not just no-crash
         run: |
-          echo 'SHIVA_IND_DISCOVERY_ONLY=pass;admission=not_proven'
+          SHIVA_QA_INDESIGN_DIR="$RUNNER_TEMP/shiva-real-indesign" cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_indesign_corpus -- --nocapture
+      - name: Explicitly identify this job as QA, not format admission
+        run: |
+          echo 'SHIVA_IND_QA_ONLY=pass;shipping_pdf_admission=blocked'
