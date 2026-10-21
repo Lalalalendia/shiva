@@ -207,7 +207,6 @@ fn parse_page(
         text: &mut String,
         encoding: &Encoding<'_>,
         operands: &[Object],
-        elements: &mut Vec<Element>,
         budget: &mut PdfBudget,
         depth: usize,
     ) -> anyhow::Result<()> {
@@ -227,39 +226,13 @@ fn parse_page(
                     budget.text(decoded_text.len())?;
                     text.push_str(&decoded_text);
 
-                    // Preserve Shiva's original special list marker handling
-                    // without cloning the entire existing paragraph/list.
-                    if bytes.len() == 1 && bytes[0] == 1 {
-                        if elements.is_empty() {
-                            budget.elements(1)?;
-                            elements.push(List { elements: vec![], numbered: false });
-                        } else if matches!(elements.last(), Some(List { .. })) {
-                            budget.elements(2)?;
-                            if let Some(List { elements: list_items, .. }) = elements.last_mut() {
-                                list_items.push(ListItem {
-                                    element: Text {
-                                        text: std::mem::take(text),
-                                        size: 8,
-                                    },
-                                });
-                            }
-                        } else if matches!(elements.last(), Some(Paragraph { .. })) {
-                            budget.elements(3)?;
-                            if let Some(Paragraph { elements: paragraph_items }) = elements.last_mut() {
-                                paragraph_items.push(Text {
-                                    text: std::mem::take(text),
-                                    size: 8,
-                                });
-                            }
-                            elements.push(List { elements: vec![], numbered: false });
-                        } else {
-                            budget.elements(1)?;
-                            elements.push(List { elements: vec![], numbered: false });
-                        }
-                    }
+                    // A PDF string contains font-specific glyph codes, not list
+                    // tokens. Even 0x01 may map to an ordinary printable glyph
+                    // via /ToUnicode (LibreOffice maps it to 'L').
+
                 }
                 Object::Array(arr) => {
-                    collect_text(text, encoding, arr, elements, budget, depth + 1)?;
+                    collect_text(text, encoding, arr, budget, depth + 1)?;
                     budget.text(1)?;
                     text.push(' ');
                 }
@@ -320,7 +293,7 @@ fn parse_page(
             "Tj" | "TJ" => {
                 let encoding = current_encoding
                     .ok_or_else(|| anyhow::anyhow!("PDF text without a usable font"))?;
-                collect_text(&mut text, encoding, &operation.operands, elements, budget, 0)?;
+                collect_text(&mut text, encoding, &operation.operands, budget, 0)?;
             }
             "ET" => {
                 if !text.ends_with('\n') {
