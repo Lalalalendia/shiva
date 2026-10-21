@@ -1,0 +1,50 @@
+name: Shiva LibreOffice Writer PDF QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/tests/pdf_libreoffice_corpus.rs'
+      - 'scripts/ci/generate-libreoffice-pdf-corpus.py'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-libreoffice-corpus.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/tests/pdf_libreoffice_corpus.rs'
+      - 'scripts/ci/generate-libreoffice-pdf-corpus.py'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - '.github/workflows/pdf-libreoffice-corpus.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  libreoffice-writer-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install QA-only LibreOffice Writer and independent Poppler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libreoffice-writer poppler-utils fonts-liberation fonts-dejavu-core
+          libreoffice --version
+          pdfinfo -v
+          pdftotext -v
+      - name: Generate three real Writer-exported PDFs from synthetic OOXML
+        run: |
+          python -m py_compile scripts/ci/generate-libreoffice-pdf-corpus.py
+          python scripts/ci/generate-libreoffice-pdf-corpus.py --binary "$(command -v libreoffice)" --out "$RUNNER_TEMP/shiva-libreoffice"
+      - name: Prove every source line on all nine PDF pages in Shiva
+        run: |
+          SHIVA_QA_LIBREOFFICE_DIR="$RUNNER_TEMP/shiva-libreoffice" cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_libreoffice_corpus -- --nocapture
