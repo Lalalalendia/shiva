@@ -6,6 +6,11 @@ publish = false
 license = "MIT OR Apache-2.0"
 description = "Linux-only, fail-closed proof of a sandboxed Shiva document extractor"
 
+[features]
+default = []
+# Linux debug-only laboratory gate. Release builds must never admit PDF.
+qa-pdf-worker = ["shiva/pdf"]
+
 [dependencies]
 shiva = { path = "../lib", default-features = false, features = ["text", "markdown", "html"] }
 shiva-extractor-protocol = { path = "../extractor-protocol" }
