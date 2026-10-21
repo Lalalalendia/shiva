@@ -1,0 +1,66 @@
+name: Shiva QA-only PDF worker process boundary
+
+on:
+  pull_request:
+    paths:
+      - 'worker/**'
+      - 'worker-client/**'
+      - 'extractor-protocol/**'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - 'Cargo.toml'
+      - '.github/workflows/qa-pdf-worker.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - 'worker-client/**'
+      - 'extractor-protocol/**'
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/**'
+      - 'lib/Cargo.toml'
+      - 'Cargo.toml'
+      - '.github/workflows/qa-pdf-worker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qa-pdf-worker-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Default build must reject PDF without touching the worker
+        env:
+          SHIVA_TEST_WORKER_BIN: ${{ github.workspace }}/target/debug/shiva-worker
+        run: |
+          cargo build -p shiva-worker
+          cargo test -p shiva-worker --lib -- --nocapture
+          cargo test -p shiva-worker-client --lib -- --nocapture
+          cargo test -p shiva-worker-client --test host_process unsupported_pdf_is_not_launched -- --nocapture
+
+      - name: Build opt-in Linux debug QA PDF worker
+        run: cargo build -p shiva-worker --features qa-pdf-worker
+
+      - name: Verify real OS-contained PDF E2E and both fail-closed gates
+        env:
+          SHIVA_TEST_WORKER_BIN: ${{ github.workspace }}/target/debug/shiva-worker
+        run: |
+          cargo test -p shiva-worker --features qa-pdf-worker --lib -- --nocapture
+          cargo test -p shiva-worker-client --features qa-pdf-worker --lib -- --nocapture
+          cargo test -p shiva-worker-client --features qa-pdf-worker --test host_process -- --nocapture
+
+      - name: Release build stays PDF-denying even when QA feature is selected
+        run: |
+          cargo test --release -p shiva-worker --features qa-pdf-worker --lib policy_never_enables_docx_or_archives -- --nocapture
+          cargo test --release -p shiva-worker-client --features qa-pdf-worker --lib format_policy_requires_explicit_qa_build_on_linux -- --nocapture
+
+      - name: Explicitly forbid shipping admission
+        run: |
+          echo 'SHIVA_QA_PDF_WORKER=feature_gated;production_pdf=disabled;akula_filegate=unintegrated'
