@@ -9,11 +9,13 @@ description = "Linux-only, fail-closed proof of a sandboxed Shiva document extra
 [features]
 default = []
 # Linux debug-only laboratory gate. Release builds must never admit PDF.
-qa-pdf-worker = ["shiva/pdf"]
+qa-pdf-worker = ["shiva/pdf", "dep:lopdf"]
 
 [dependencies]
 shiva = { path = "../lib", default-features = false, features = ["text", "markdown", "html"] }
 shiva-extractor-protocol = { path = "../extractor-protocol" }
+# Only compiled by the Linux debug QA gate to reject non-text PDF content.
+lopdf = { version = "=0.45.0", default-features = false, optional = true }
 bytes = "1"
 anyhow = "1"
 blake3 = "1"
