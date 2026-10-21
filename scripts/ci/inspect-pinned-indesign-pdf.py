@@ -17,6 +17,7 @@ SOURCE_REPO = "openpreserve/format-corpus"
 SOURCE_COMMIT = "366f068cec399d0cdfd61fa473de3ab6dc858098"
 SOURCE_PATH = "desktop-publishing/InDesign/Neddy_Flyer_HeatherRyan.pdf"
 SOURCE_BLOB_SHA1 = "a60bed5ae166a191919ff35abd08ac33cb325bb9"
+SOURCE_SHA256 = "6a3c9444d4905c8896a717be7c30ee7d20b3c319eb2d3d469393a0f0e3529243"
 SOURCE_BYTES = 59106
 MAX_SOURCE_BYTES = 256 * 1024
 MAX_TOOL_OUTPUT = 256 * 1024
@@ -34,7 +35,10 @@ def verify_bytes(data: bytes) -> str:
     blob_sha1 = hashlib.sha1(git_header + data).hexdigest()
     if blob_sha1 != SOURCE_BLOB_SHA1:
         raise ValueError("external InDesign sample differs from immutable Git blob")
-    return hashlib.sha256(data).hexdigest()
+    actual_sha256 = hashlib.sha256(data).hexdigest()
+    if actual_sha256 != SOURCE_SHA256:
+        raise ValueError("external InDesign sample SHA-256 differs from CI-pinned receipt")
+    return actual_sha256
 
 
 def fetch_fixed_pdf() -> bytes:
@@ -48,15 +52,48 @@ def fetch_fixed_pdf() -> bytes:
 
 
 def checked(command: list[str], timeout: int = 20) -> bytes:
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            timeout=timeout, check=False)
-    if result.returncode or len(result.stdout) > MAX_TOOL_OUTPUT or len(result.stderr) > MAX_TOOL_OUTPUT:
-        raise RuntimeError("independent PDF inspection failed or output exceeded QA budget")
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=timeout, check=False,
+    )
+    if len(result.stdout) > MAX_TOOL_OUTPUT or len(result.stderr) > MAX_TOOL_OUTPUT:
+        raise RuntimeError("PDF inspection tool exceeded output limit")
+    if result.returncode:
+        diagnostic = result.stderr.decode("utf-8", errors="replace")[:2400]
+        raise RuntimeError(
+            f"PDF inspector {command[0]} failed, exit={result.returncode};"
+            f" diagnostic={diagnostic!r}"
+        )
     return result.stdout
 
 
+def qpdf_diagnosis(pdf: Path) -> str:
+    # qpdf 3 means recoverable warnings; this discovery task may inspect
+    # with Poppler but must NEVER assert that warnings imply a valid PDF.
+    result = subprocess.run(
+        ["qpdf", "--check", str(pdf)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        timeout=20, check=False,
+    )
+    if len(result.stdout) > MAX_TOOL_OUTPUT or len(result.stderr) > MAX_TOOL_OUTPUT:
+        raise RuntimeError("qpdf diagnostic exceeded output budget")
+    diagnostic = (
+        result.stdout + b"\\n" + result.stderr
+    ).decode("utf-8", errors="replace")[:6000]
+    print(
+        f"SHIVA_IND_QPDF_DIAG=exit_{result.returncode};"
+        f"message={diagnostic!r}",
+        flush=True,
+    )
+    if result.returncode == 0:
+        return "clean"
+    if result.returncode == 3:
+        return "warnings_not_admitted"
+    raise RuntimeError(f"qpdf rejected real source: exit={result.returncode}")
+
+
 def inspect(pdf: Path) -> None:
-    checked(["qpdf", "--check", str(pdf)])
+    structural_status = qpdf_diagnosis(pdf)
     info = checked(["pdfinfo", str(pdf)]).decode("utf-8", errors="replace")
     page_match = re.search(r"^Pages:\s*(\d+)\s*$", info, re.MULTILINE)
     if page_match is None:
@@ -71,11 +108,11 @@ def inspect(pdf: Path) -> None:
     text = checked(["pdftotext", "-enc", "UTF-8", "-layout", str(pdf), "-"])
     decoded = text.decode("utf-8", errors="strict")
     segments = decoded.split("\f")
-    if segments and segments[-1] == "":
+    if segments and not segments[-1].strip():
         segments.pop()
     if len(segments) != pages:
         raise AssertionError("independent PDF text segmentation differs from page count")
-    print(f"SHIVA_IND_REAL_PDF=receipt_only;pages={pages};text_bytes={len(text)};"
+    print(f"SHIVA_IND_REAL_PDF=receipt_only;structural_status={structural_status};pages={pages};text_bytes={len(text)};"
           f"creator={metadata['creator']!r};producer={metadata['producer']!r}", flush=True)
     for page_number, segment in enumerate(segments, 1):
         lines = [line.strip() for line in segment.splitlines() if line.strip()]
@@ -84,7 +121,7 @@ def inspect(pdf: Path) -> None:
         for line in lines[:16]:
             # Public CC0-authorized fixture only, never a user document.
             print("SHIVA_IND_CANDIDATE_ORACLE=" + repr(line[:120]), flush=True)
-    print("SHIVA_IND_ADMISSION=pending_SHA256_pin_and_fixed_text_oracle", flush=True)
+    print("SHIVA_IND_ADMISSION=blocked_pending_fixed_text_oracle_and_cross_platform_Shiva", flush=True)
 
 
 def main() -> None:
