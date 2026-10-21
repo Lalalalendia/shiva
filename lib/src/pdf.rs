@@ -213,8 +213,49 @@ fn normalize_legacy_adobe_type0_cmaps(
 ) -> anyhow::Result<()> {
     const MAX_CMAPS_TO_REPAIR: usize = 64;
     const MAX_REPAIR_TOTAL_BYTES: usize = 2 * 1024 * 1024;
-    const OLD_HEADER: &[u8] = b"begincmap\nCIDSystemInfo\n<<";
-    const NEW_HEADER: &[u8] = b"begincmap\n/CIDSystemInfo\n<<";
+    const CMAP_START: &[u8] = b"begincmap";
+    const LEGACY_KEY: &[u8] = b"CIDSystemInfo";
+    fn cmap_space(byte: u8) -> bool {
+        matches!(byte, b' ' | b'\n' | b'\r' | b'\t' | 0x0c)
+    }
+    // Allow PDF/CMap whitespace, but not arbitrary substitutions or
+    // missing delimiters. The only mutation is a slash before this key.
+    fn legacy_key_offset(cmap: &[u8]) -> Option<usize> {
+        let mut found = None;
+        for (start, word) in cmap.windows(CMAP_START.len()).enumerate() {
+            if word != CMAP_START {
+                continue;
+            }
+            if start > 0 && !cmap_space(cmap[start - 1]) {
+                continue;
+            }
+            let mut at = start + CMAP_START.len();
+            if !cmap.get(at).is_some_and(|b| cmap_space(*b)) {
+                continue;
+            }
+            while cmap.get(at).is_some_and(|b| cmap_space(*b)) {
+                at += 1;
+            }
+            if !cmap[at..].starts_with(LEGACY_KEY) {
+                continue;
+            }
+            let key_at = at;
+            at += LEGACY_KEY.len();
+            if !cmap.get(at).is_some_and(|b| cmap_space(*b)) {
+                continue;
+            }
+            while cmap.get(at).is_some_and(|b| cmap_space(*b)) {
+                at += 1;
+            }
+            if !cmap[at..].starts_with(b"<<") {
+                continue;
+            }
+            if found.replace(key_at).is_some() {
+                return None; // ambiguous normalization must fail closed
+            }
+        }
+        found
+    }
 
     let mut affected_ids = BTreeSet::<ObjectId>::new();
     for &page_id in pages {
@@ -261,23 +302,14 @@ fn normalize_legacy_adobe_type0_cmaps(
             decoded_bytes <= MAX_REPAIR_TOTAL_BYTES,
             "PDF legacy CMap total decoded budget exceeded"
         );
-        let candidates: Vec<usize> = cmap
-            .windows(OLD_HEADER.len())
-            .enumerate()
-            .filter_map(|(index, bytes)| (bytes == OLD_HEADER).then_some(index))
-            .take(2)
-            .collect();
-        anyhow::ensure!(
-            candidates.len() == 1,
-            "composite PDF font has no usable ToUnicode mapping"
-        );
-        let start = candidates[0];
-        // Patch the exact metadata spelling; never synthesize font mappings
-        // or make a heuristic substitution for an unknown source glyph.
+        let key_at = legacy_key_offset(&cmap)
+            .ok_or_else(|| anyhow::anyhow!("composite PDF font has no usable ToUnicode mapping"))?;
+        // Keep the complete original metadata, mapping definitions and
+        // line endings unchanged. Insert exactly one syntax token.
         let mut canonical = Vec::with_capacity(cmap.len() + 1);
-        canonical.extend_from_slice(&cmap[..start]);
-        canonical.extend_from_slice(NEW_HEADER);
-        canonical.extend_from_slice(&cmap[start + OLD_HEADER.len()..]);
+        canonical.extend_from_slice(&cmap[..key_at]);
+        canonical.push(b'/');
+        canonical.extend_from_slice(&cmap[key_at..]);
         pdf.get_object_mut(id)?
             .as_stream_mut()?
             .set_plain_content(canonical);
