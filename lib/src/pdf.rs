@@ -7,7 +7,7 @@ use log::warn;
 use lopdf::content::Content;
 use lopdf::Encoding;
 use lopdf::{Document as PdfDocument, LoadOptions, Object, ObjectId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use typst::{eval::Tracer, foundations::Smart};
 
@@ -30,13 +30,16 @@ impl TransformerTrait for Transformer {
             document.len() <= MAX_PDF_INPUT,
             "PDF input exceeds standalone parser byte limit"
         );
-        let pdf_document = PdfDocument::load_mem_with_options(
+        let mut pdf_document = PdfDocument::load_mem_with_options(
             document,
             LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
         )?;
         // A lenient get_pages() traversal can skip corrupt subtrees silently.
         // Validate the exact graph once and extract only this ordered snapshot.
         let verified_pages = page_tree::validate_page_tree(&pdf_document)?;
+        // Normalize only the documented Adobe CMap metadata variant before
+        // resolving any font; unrecognized mappings still reject the PDF.
+        normalize_legacy_adobe_type0_cmaps(&mut pdf_document, &verified_pages)?;
         for page_id in verified_pages {
             parse_page(page_id, &pdf_document, &mut elements, &mut budget)?;
         }
@@ -195,6 +198,91 @@ fn checked_page_content(pdf: &PdfDocument, page_id: ObjectId) -> anyhow::Result<
         page_content.push(b'\n');
     }
     Ok(page_content)
+}
+
+// Adobe InDesign CS 3.0 emitted "/ToUnicode" streams with the legacy
+// PostScript token "CIDSystemInfo" (without a leading slash). Lopdf 0.45's
+// otherwise strict parser requires "/CIDSystemInfo" and silently falls back
+// to a single-byte encoding when it encounters that spelling. We correct
+// ONLY this one metadata token in memory, NEVER CMap codepoint mappings.
+// Missing/malformed mappings still cause an error when the glyph is decoded.
+// No original PDF bytes are modified or written to disk.
+fn normalize_legacy_adobe_type0_cmaps(
+    pdf: &mut PdfDocument,
+    pages: &[ObjectId],
+) -> anyhow::Result<()> {
+    const MAX_CMAPS_TO_REPAIR: usize = 64;
+    const MAX_REPAIR_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+    const OLD_HEADER: &[u8] = b"begincmap\nCIDSystemInfo\n<<";
+    const NEW_HEADER: &[u8] = b"begincmap\n/CIDSystemInfo\n<<";
+
+    let mut affected_ids = BTreeSet::<ObjectId>::new();
+    for &page_id in pages {
+        let fonts = pdf.get_page_fonts(page_id)?;
+        anyhow::ensure!(fonts.len() <= 64, "PDF per-page font count budget exceeded");
+        for font in fonts.values() {
+            let is_composite = font.get(b"Subtype")
+                .and_then(Object::as_name)
+                .map(|value| value == b"Type0")
+                .unwrap_or(false);
+            if !is_composite {
+                continue;
+            }
+            // If lopdf can decode this CMap unchanged, never normalize it.
+            let current = font.get_font_encoding_with_limit(pdf, MAX_TOUNICODE_CMAP)?;
+            if matches!(current, Encoding::UnicodeMapEncoding(_)) {
+                continue;
+            }
+            let id = font.get(b"ToUnicode")?.as_reference()?;
+            affected_ids.insert(id);
+            anyhow::ensure!(
+                affected_ids.len() <= MAX_CMAPS_TO_REPAIR,
+                "PDF legacy CMap repair count budget exceeded"
+            );
+        }
+    }
+
+    let mut decoded_bytes = 0usize;
+    for id in affected_ids {
+        let stream = pdf.get_object(id)?.as_stream()?;
+        let filters = if stream.dict.get(b"Filter").is_ok() {
+            stream.filters()?
+        } else {
+            Vec::new()
+        };
+        if filters.len() == 1 && filters[0] == b"FlateDecode" {
+            validate_flate_integrity(&stream.content, MAX_TOUNICODE_CMAP)?;
+        }
+        let cmap = stream.get_plain_content_with_limit(MAX_TOUNICODE_CMAP)?;
+        decoded_bytes = decoded_bytes
+            .checked_add(cmap.len())
+            .ok_or_else(|| anyhow::anyhow!("PDF legacy CMap budget overflow"))?;
+        anyhow::ensure!(
+            decoded_bytes <= MAX_REPAIR_TOTAL_BYTES,
+            "PDF legacy CMap total decoded budget exceeded"
+        );
+        let candidates: Vec<usize> = cmap
+            .windows(OLD_HEADER.len())
+            .enumerate()
+            .filter_map(|(index, bytes)| (bytes == OLD_HEADER).then_some(index))
+            .take(2)
+            .collect();
+        anyhow::ensure!(
+            candidates.len() == 1,
+            "composite PDF font has no usable ToUnicode mapping"
+        );
+        let start = candidates[0];
+        // Patch the exact metadata spelling; never synthesize font mappings
+        // or make a heuristic substitution for an unknown source glyph.
+        let mut canonical = Vec::with_capacity(cmap.len() + 1);
+        canonical.extend_from_slice(&cmap[..start]);
+        canonical.extend_from_slice(NEW_HEADER);
+        canonical.extend_from_slice(&cmap[start + OLD_HEADER.len()..]);
+        pdf.get_object_mut(id)?
+            .as_stream_mut()?
+            .set_plain_content(canonical);
+    }
+    Ok(())
 }
 
 fn parse_page(
@@ -553,6 +641,50 @@ end"#;
         assert!(output.contains("Пр世丗"), "ToUnicode output lost Cyrillic/CJK: {output}");
         assert_eq!(output.matches("Пр世丗").count(), 1, "duplicated text: {output}");
         assert!(!output.contains('\u{FFFD}'), "Unicode replacement leaked into parsed text");
+        Ok(())
+    }
+
+    /// Real InDesign CS CMaps omit the slash on "CIDSystemInfo". Their
+    /// contents still have valid 2-byte Unicode mappings and must not
+    /// fall back to Latin-1 or skip glyphs. The same bytes without a
+    /// complete glyph mapping must remain fail-closed.
+    #[test]
+    fn cid_identity_h_legacy_adobe_cmap_preserves_unicode() -> anyhow::Result<()> {
+        use lopdf::{Object, Stream};
+
+        fn fixture_with_legacy_metadata(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+            let original = cid_identity_h_fixture(true, bytes)?;
+            let mut pdf = lopdf::Document::load_mem(&original)?;
+            // This synthetic fixture has one ToUnicode CMap stream.
+            let pages = pdf.get_pages();
+            let (_, &page_id) = pages.iter().next()
+                .ok_or_else(|| anyhow::anyhow!("fixture has no page"))?;
+            let fonts = pdf.get_page_fonts(page_id)?;
+            let font = fonts.get(b"F1".as_slice())
+                .ok_or_else(|| anyhow::anyhow!("fixture has no font"))?;
+            let id = font.get(b"ToUnicode")?.as_reference()?;
+            let stream = pdf.get_object_mut(id)?.as_stream_mut()?;
+            let metadata = String::from_utf8(stream.content.clone())?;
+            assert_eq!(metadata.matches("/CIDSystemInfo").count(), 1);
+            stream.set_plain_content(
+                metadata.replacen("/CIDSystemInfo", "CIDSystemInfo", 1).into_bytes()
+            );
+            let mut out = Vec::new();
+            pdf.save_to(&mut out)?;
+            Ok(out)
+        }
+        let valid = fixture_with_legacy_metadata(&[0, 1, 0, 2, 0, 3, 0, 4])?;
+        let doc = Transformer::parse(&Bytes::from(valid))?;
+        let result = format!("{doc:?}");
+        assert!(result.contains("Пр世丗"), "legacy Adobe Unicode was lost: {result}");
+        assert!(!result.contains('\u{FFFD}'));
+        let unmapped = fixture_with_legacy_metadata(&[0, 1, 0, 9])?;
+        let error = Transformer::parse(&Bytes::from(unmapped))
+            .expect_err("unknown glyph must fail despite metadata normalization");
+        assert!(
+            error.to_string().contains("glyph could not be mapped"),
+            "must reject missing glyph, actual error: {error}"
+        );
         Ok(())
     }
 
