@@ -183,7 +183,7 @@ fn nested_outer_job_allows_atomic_inner_worker_launch() {
 // This intentionally exercises the strict host -> OS-contained child ->
 // framed result -> host's Complete-only transaction boundary.
 #[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
-fn synthetic_pdf(lines: &[&str]) -> Vec<u8> {
+fn synthetic_pdf(lines: &[&str], with_graphics: bool) -> Vec<u8> {
     use lopdf::content::{Content, Operation};
     use lopdf::{dictionary, Document, Object, Stream, StringFormat};
 
@@ -212,6 +212,11 @@ fn synthetic_pdf(lines: &[&str]) -> Vec<u8> {
         ));
     }
     ops.push(Operation::new("ET", vec![]));
+    if with_graphics {
+        // A real visible rectangle, not just suspicious PDF metadata.
+        ops.push(Operation::new("re", vec![10.into(), 10.into(), 50.into(), 50.into()]));
+        ops.push(Operation::new("f", vec![]));
+    }
     let contents_id = pdf.add_object(Stream::new(
         dictionary! {},
         Content { operations: ops }.encode().expect("encode PDF QA operators"),
@@ -242,7 +247,7 @@ fn synthetic_pdf(lines: &[&str]) -> Vec<u8> {
 #[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn real_confined_pdf_child_roundtrip_via_pinned_host_and_complete_only_commit() {
-    let pdf = synthetic_pdf(&["AQPDFALPHA", "AQPDFBETA"]);
+    let pdf = synthetic_pdf(&["AQPDFALPHA", "AQPDFBETA"], false);
     let authorized = settings(worker_path());
     let verified = extract(&authorized, "authorized_pdf_lab_1", "pdf", &pdf)
         .expect("QA-only isolated PDF must return a complete verified stream");
@@ -263,7 +268,7 @@ fn real_confined_pdf_child_roundtrip_via_pinned_host_and_complete_only_commit() 
 #[test]
 fn incomplete_or_corrupt_pdf_cannot_reach_verified_document() {
     let cfg = settings(worker_path());
-    let blank = synthetic_pdf(&[]);
+    let blank = synthetic_pdf(&[], false);
     assert!(matches!(
         extract(&cfg, "blank_pdf_qa", "pdf", &blank),
         Err(ClientError::FailedExtraction)
@@ -272,6 +277,11 @@ fn incomplete_or_corrupt_pdf_cannot_reach_verified_document() {
         extract(&cfg, "bad_pdf_qa", "pdf", b"%PDF-1.7\nbroken"),
         Err(ClientError::FailedExtraction)
     ), "a malformed PDF cannot reach the indexable result");
+    let with_graphics = synthetic_pdf(&["AQPDFALPHA"], true);
+    assert!(matches!(
+        extract(&cfg, "graphics_pdf_qa", "pdf", &with_graphics),
+        Err(ClientError::FailedExtraction)
+    ), "partial text plus vector drawing must not be reported Complete");
     assert!(matches!(
         extract(&cfg, "unsupported_docx_qa", "docx", b"PK\x03\x04"),
         Err(ClientError::InvalidFormat)
