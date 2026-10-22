@@ -33,6 +33,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/ci/generate-pdf-visual-truth.py --out "$RUNNER_TEMP/shiva-pdf-visual-truth"
+      - name: Install Poppler only for independent PDF QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends poppler-utils
+          command -v pdftoppm
+          command -v pdftotext
       - name: Independently prove identical render but contradictory Unicode
         shell: bash
         run: |
