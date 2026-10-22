@@ -6,6 +6,9 @@ on:
       - '.github/workflows/djvu-ready-ocr-qa.yml'
       - 'scripts/ci/ready_ocr_lab.py'
       - 'scripts/ci/test_ready_ocr_lab.py'
+      - 'scripts/ci/private_djvu_render_audit.py'
+      - 'scripts/ci/test_private_djvu_render_audit.py'
+      - 'docs/research/djvu-real-book-01.md'
       - 'docs/research/djvu-ready-ocr-01.md'
   push:
     branches: [main]
@@ -13,6 +16,9 @@ on:
       - '.github/workflows/djvu-ready-ocr-qa.yml'
       - 'scripts/ci/ready_ocr_lab.py'
       - 'scripts/ci/test_ready_ocr_lab.py'
+      - 'scripts/ci/private_djvu_render_audit.py'
+      - 'scripts/ci/test_private_djvu_render_audit.py'
+      - 'docs/research/djvu-real-book-01.md'
       - 'docs/research/djvu-ready-ocr-01.md'
   workflow_dispatch:
 
@@ -49,12 +55,24 @@ jobs:
           python -c 'import djvu_rs; print("djvu-rs wheel import PASS")'
       - name: Run fast offline unit tests
         shell: bash
-        run: python -m unittest -v scripts/ci/test_ready_ocr_lab.py
+        run: python -m unittest -v scripts/ci/test_ready_ocr_lab.py scripts/ci/test_private_djvu_render_audit.py
       - name: Construct independent four-page Cyrillic DjVu
         shell: bash
         run: |
           set -euo pipefail
           python scripts/ci/ready_ocr_lab.py --step generate --out "$RUNNER_TEMP/shiva-djvu-ready-ocr" --require-djvu-rs
+      - name: Confirm full read-only streaming on all four synthetic DjVu pages
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_file="$RUNNER_TEMP/shiva-djvu-ready-ocr/fixture/synthetic_book.djvu"
+          expected=$(sha256sum "$source_file" | awk '{print $1}')
+          python scripts/ci/private_djvu_render_audit.py \
+            --source "$source_file" --expected-sha256 "$expected" \
+            --expected-pages 4 --dpi 300 --batch-pages 2 \
+            --out "$RUNNER_TEMP/shiva-djvu-ready-ocr/render_audit.json"
+          python -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["pages_rendered"] == 4 and d["source_unchanged"] and d["no_source_bytes_images_or_ocr_text_in_output"]' \
+            "$RUNNER_TEMP/shiva-djvu-ready-ocr/render_audit.json"
       - name: Fetch immutable published Tesseract fast + best weights and verify Git blobs
         shell: bash
         run: |
@@ -72,6 +90,7 @@ jobs:
         with:
           name: shiva-djvu-ready-ocr-synthetic-evidence
           path: |
+            ${{ runner.temp }}/shiva-djvu-ready-ocr/render_audit.json
             ${{ runner.temp }}/shiva-djvu-ready-ocr/model_receipts.json
             ${{ runner.temp }}/shiva-djvu-ready-ocr/result.json
             ${{ runner.temp }}/shiva-djvu-ready-ocr/summary.md
