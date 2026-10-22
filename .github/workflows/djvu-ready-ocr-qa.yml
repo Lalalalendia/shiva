@@ -1,0 +1,79 @@
+name: Shiva DjVu ready-model OCR lab
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/djvu-ready-ocr-qa.yml'
+      - 'scripts/ci/ready_ocr_lab.py'
+      - 'scripts/ci/test_ready_ocr_lab.py'
+      - 'docs/research/djvu-ready-ocr-01.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/djvu-ready-ocr-qa.yml'
+      - 'scripts/ci/ready_ocr_lab.py'
+      - 'scripts/ci/test_ready_ocr_lab.py'
+      - 'docs/research/djvu-ready-ocr-01.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shiva-djvu-ready-ocr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  independent-synthetic-djvu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install independent DjVu encoder / decoder, native OCR, fonts
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y djvulibre-bin tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng fonts-dejavu-core
+          for tool in cjb2 djvm ddjvu tesseract; do command -v "$tool"; done
+      - name: QA-only dependencies and published pure-Rust DjVu wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --only-binary=:all: pillow==11.3.0 psutil==7.0.0
+          python -m pip install --only-binary=:all: --no-deps djvu-rs==0.43.0
+          python -m pip check
+          python -c 'import djvu_rs; print("djvu-rs wheel import PASS")'
+      - name: Run fast offline unit tests
+        shell: bash
+        run: python -m unittest -v scripts/ci/test_ready_ocr_lab.py
+      - name: Construct independent four-page Cyrillic DjVu
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/ready_ocr_lab.py --step generate --out "$RUNNER_TEMP/shiva-djvu-ready-ocr" --require-djvu-rs
+      - name: Fetch immutable published Tesseract fast + best weights and verify Git blobs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/ready_ocr_lab.py --step fetch-models --out "$RUNNER_TEMP/shiva-djvu-ready-ocr"
+      - name: Decode DjVu in Rust, check DjVuLibre parity and measure actual OCR CER/WER
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/ready_ocr_lab.py --step measure --out "$RUNNER_TEMP/shiva-djvu-ready-ocr" --models system,fast,best --require-djvu-rs
+          cat "$RUNNER_TEMP/shiva-djvu-ready-ocr/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload text-only synthetic evidence (never book, pixels, weights or OCR text)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiva-djvu-ready-ocr-synthetic-evidence
+          path: |
+            ${{ runner.temp }}/shiva-djvu-ready-ocr/model_receipts.json
+            ${{ runner.temp }}/shiva-djvu-ready-ocr/result.json
+            ${{ runner.temp }}/shiva-djvu-ready-ocr/summary.md
+          if-no-files-found: warn
+          retention-days: 14
