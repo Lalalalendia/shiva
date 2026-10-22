@@ -125,6 +125,46 @@ def engine(root: Path):
     return RapidOCR(params=params)
 
 
+def column_reading_order(texts, boxes, page_width: int):
+    """Conservative layout-only reading order for two spatially separate columns.
+
+    Detect two clusters of LEFT edges, not OCR contents or known fixture text.
+    Require >=2 boxes on each side, a large horizontal gutter and overlapping
+    vertical ranges. Otherwise return the original order untouched.
+    """
+    original = list(texts)
+    if boxes is None or len(original) < 4 or len(boxes) != len(original) or page_width <= 0:
+        return original, 1
+    geometry = []
+    for i, quad in enumerate(boxes):
+        if len(quad) != 4:
+            return original, 1
+        try:
+            xx = [float(p[0]) for p in quad]
+            yy = [float(p[1]) for p in quad]
+        except (IndexError, TypeError, ValueError):
+            return original, 1
+        geometry.append((min(xx), min(yy), max(yy), i))
+    by_left = sorted(geometry)
+    gaps = [(by_left[i + 1][0] - by_left[i][0], i)
+            for i in range(len(by_left) - 1)]
+    gap, split = max(gaps)
+    if gap < page_width * 0.25:
+        return original, 1
+    left, right = by_left[:split + 1], by_left[split + 1:]
+    if len(left) < 2 or len(right) < 2:
+        return original, 1
+    # Two columns must overlap in the vertical dimension, not be two
+    # differently indented paragraphs on different sections of a page.
+    if max(min(p[1] for p in left), min(p[1] for p in right)) >= min(
+        max(p[2] for p in left), max(p[2] for p in right)
+    ):
+        return original, 1
+    def top_to_bottom(group):
+        return [original[p[3]] for p in sorted(group, key=lambda p: (p[1], p[0]))]
+    return top_to_bottom(left) + top_to_bottom(right), 2
+
+
 def measure(root: Path):
     import os
     import tempfile
@@ -154,16 +194,27 @@ def measure(root: Path):
             t0 = time.perf_counter()
             result = ocr(str(src))
             warm_time = round(time.perf_counter() - t0, 4)
-            predicted = " ".join(result.txts or [])
-            score = base.quality(page["truth"], predicted)
-            count = len(result.txts or [])
+            lines = list(result.txts or [])
+            raw_score = base.quality(page["truth"], " ".join(lines))
+            from PIL import Image
+            with Image.open(src) as check_image:
+                image_width = check_image.width
+            corrected_lines, detected_columns = column_reading_order(
+                lines, getattr(result, "boxes", None), image_width
+            )
+            score = base.quality(page["truth"], " ".join(corrected_lines))
+            count = len(lines)
             peak_process_rss = max(peak_process_rss, psutil.Process().memory_info().rss)
-            pp.append({"page": page["page"], "lines": count, "warm_sec": warm_time, **score})
+            pp.append({"page": page["page"], "lines": count, "warm_sec": warm_time,
+                       "columns_detected": detected_columns,
+                       "raw_cer": raw_score["cer"], "raw_wer": raw_score["wer"],
+                       **score})
             for fam in ("fast", "best"):
                 text, secs, rss = base.tesseract(src, fam, root / "models")
                 tess.append({"page": page["page"], "family": fam,
                              "cold_sec": secs, "rss_mb": rss, **base.quality(page["truth"], text)})
-            print(f"page={page['page']} PP CER={score['cer']:.3f} lines={count} "
+            print(f"page={page['page']} PP raw CER={raw_score['cer']:.3f} "
+                  f"ordered CER={score['cer']:.3f} columns={detected_columns}, lines={count} "
                   f"fast CER={tess[-2]['cer']:.3f} best CER={tess[-1]['cer']:.3f}", flush=True)
         if sum(x["lines"] > 0 for x in pp) < 3:
             raise AssertionError("PP-OCRv5 failed to detect text on most test pages")
@@ -182,6 +233,9 @@ def measure(root: Path):
         }
     output = {
         "status": "executed", "no_training": True,
+        "ppocr_raw_cer_mean": round(statistics.mean(x["raw_cer"] for x in pp), 6),
+        "ppocr_raw_wer_mean": round(statistics.mean(x["raw_wer"] for x in pp), 6),
+        "layout_method": "conservative two-column left-edge spatial clustering, no model changes",
         "synthetic_only": True, "no_user_book": True,
         "decoder": djvu,
         "pipeline": "PP-OCRv4 mobile DBNet detector + Cyrillic PP-OCRv5 CTC recognizer",
@@ -206,6 +260,9 @@ def measure(root: Path):
     lines += ["", f"PP-OCR cold initialization: {init_sec:.3f} s",
               f"PP Python process RSS (includes interpreter and decoder): {output['pp_peak_python_process_rss_mb']:.1f} MB",
               "", "Not comparable latency: PP warmed once; Tesseract launched per page.",
+              "PP raw mean CER: " + str(output["ppocr_raw_cer_mean"]),
+              "PP raw mean WER: " + str(output["ppocr_raw_wer_mean"]),
+              "Layout correction: conservative two-column spatial order from OCR boxes; model unchanged.",
               "No production DjVu admission, no real-book accuracy claim."]
     (root / "ppocr_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
