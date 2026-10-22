@@ -6,6 +6,10 @@ on:
       - '.github/workflows/djvu-ready-ocr-qa.yml'
       - 'scripts/ci/ready_ocr_lab.py'
       - 'scripts/ci/test_ready_ocr_lab.py'
+      - 'scripts/ci/ocr_review_projection.py'
+      - 'scripts/ci/test_ocr_review_projection.py'
+      - 'scripts/ci/check_ocr_go_figure.py'
+      - 'docs/research/djvu-ocr-review-01.md'
       - 'scripts/ci/private_djvu_render_audit.py'
       - 'scripts/ci/test_private_djvu_render_audit.py'
       - 'docs/research/djvu-real-book-01.md'
@@ -16,6 +20,10 @@ on:
       - '.github/workflows/djvu-ready-ocr-qa.yml'
       - 'scripts/ci/ready_ocr_lab.py'
       - 'scripts/ci/test_ready_ocr_lab.py'
+      - 'scripts/ci/ocr_review_projection.py'
+      - 'scripts/ci/test_ocr_review_projection.py'
+      - 'scripts/ci/check_ocr_go_figure.py'
+      - 'docs/research/djvu-ocr-review-01.md'
       - 'scripts/ci/private_djvu_render_audit.py'
       - 'scripts/ci/test_private_djvu_render_audit.py'
       - 'docs/research/djvu-real-book-01.md'
@@ -84,6 +92,13 @@ jobs:
           set -euo pipefail
           python scripts/ci/ready_ocr_lab.py --step measure --out "$RUNNER_TEMP/shiva-djvu-ready-ocr" --models system,fast,best --require-djvu-rs
           cat "$RUNNER_TEMP/shiva-djvu-ready-ocr/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Review Go-diagram OCR candidates without silent text deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH=scripts/ci python -m unittest -v scripts/ci/test_ocr_review_projection.py
+          python scripts/ci/check_ocr_go_figure.py --djvu-rs --out "$RUNNER_TEMP/shiva-djvu-ready-ocr"
+          cat "$RUNNER_TEMP/shiva-djvu-ready-ocr/figure_quality.json" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload text-only synthetic evidence (never book, pixels, weights or OCR text)
         if: always()
         uses: actions/upload-artifact@v4
@@ -94,5 +109,6 @@ jobs:
             ${{ runner.temp }}/shiva-djvu-ready-ocr/model_receipts.json
             ${{ runner.temp }}/shiva-djvu-ready-ocr/result.json
             ${{ runner.temp }}/shiva-djvu-ready-ocr/summary.md
+            ${{ runner.temp }}/shiva-djvu-ready-ocr/figure_quality.json
           if-no-files-found: warn
           retention-days: 14
