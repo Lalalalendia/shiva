@@ -1,0 +1,46 @@
+name: Shiva PDF fidelity report QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/fidelity.rs'
+      - 'lib/tests/pdf_fidelity_report.rs'
+      - '.github/workflows/pdf-fidelity-report.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/src/pdf.rs'
+      - 'lib/src/pdf/fidelity.rs'
+      - 'lib/tests/pdf_fidelity_report.rs'
+      - '.github/workflows/pdf-fidelity-report.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-fidelity:
+    name: Native PDF status remains explicitly unverified
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate bounded QA-only PDFs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/generate-pdf-visual-truth.py --out "$RUNNER_TEMP/shiva-visual"
+          python3 scripts/ci/generate-pdf-operators.py --out "$RUNNER_TEMP/shiva-operators"
+      - name: Assert conservative PDF statuses in real Shiva
+        shell: bash
+        env:
+          SHIVA_QA_VISUAL_TRUTH_DIR: ${{ runner.temp }}/shiva-visual
+          SHIVA_QA_TEXT_OPERATORS_DIR: ${{ runner.temp }}/shiva-operators
+        run: |
+          set -euo pipefail
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_fidelity_report -- --nocapture

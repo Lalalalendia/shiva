@@ -13,6 +13,10 @@ use typst::{eval::Tracer, foundations::Smart};
 
 pub struct Transformer;
 
+// Explicitly provisional native extraction; no implicit Complete verdict.
+mod fidelity;
+pub use fidelity::{PdfExtractionReport, PdfFidelityIssue, PdfFidelityStatus, PdfPageFidelity};
+
 // Standalone library QA limits, not permission to enable PDF in the worker.
 // Per-stream and page limits are supplemented below with cumulative page,
 // text, operation and element limits. Process CPU, actual RSS and all PDF
@@ -22,8 +26,15 @@ const MAX_DECOMPRESSED_STREAM: usize = 8 * 1024 * 1024;
 const MAX_TOUNICODE_CMAP: usize = 1024 * 1024;
 const MAX_PDF_PAGES: usize = 1024;
 
-impl TransformerTrait for Transformer {
-    fn parse(document: &Bytes) -> anyhow::Result<Document> {
+impl Transformer {
+    /// Extract native PDF text plus a conservative, bounded fidelity report.
+    ///
+    /// This API never returns "Complete": even a well-formed /ToUnicode map
+    /// can disagree with painted glyphs. A PDF with unprocessed XObjects is
+    /// Partial; any other parsed PDF still NeedsReview until a separate,
+    /// independent visual-fidelity gate exists. The report contains no raw
+    /// private source text, xobject names or path data.
+    pub fn parse_with_diagnostics(document: &Bytes) -> anyhow::Result<PdfExtractionReport> {
         let mut elements: Vec<Element> = Vec::new();
         let mut budget = PdfBudget::default();
         anyhow::ensure!(
@@ -34,13 +45,22 @@ impl TransformerTrait for Transformer {
             document,
             LoadOptions::with_max_decompressed_size(MAX_DECOMPRESSED_STREAM),
         )?;
-        // A lenient get_pages() traversal can skip corrupt subtrees silently.
-        // Validate the exact graph once and extract only this ordered snapshot.
+        // Use exactly the validated page tree and per-page budget of the
+        // existing trusted-library path, not a second lenient extraction.
         let verified_pages = page_tree::validate_page_tree(&pdf_document)?;
-        for page_id in verified_pages {
-            parse_page(page_id, &pdf_document, &mut elements, &mut budget)?;
+        let mut pages = Vec::with_capacity(verified_pages.len());
+        for (index, page_id) in verified_pages.into_iter().enumerate() {
+            let mut fidelity = PdfPageFidelity::unverified(index + 1);
+            parse_page(page_id, &pdf_document, &mut elements, &mut budget, &mut fidelity)?;
+            pages.push(fidelity);
         }
-        Ok(Document::new(elements))
+        Ok(PdfExtractionReport::new(Document::new(elements), pages))
+    }
+}
+
+impl TransformerTrait for Transformer {
+    fn parse(document: &Bytes) -> anyhow::Result<Document> {
+        Ok(Self::parse_with_diagnostics(document)?.document)
     }
     fn generate(document: &Document) -> anyhow::Result<Bytes> {
         let (text, img_map) = crate::typst::generate_document(document)?;
@@ -202,6 +222,7 @@ fn parse_page(
     pdf_document: &PdfDocument,
     elements: &mut Vec<Element>,
     budget: &mut PdfBudget,
+    fidelity: &mut PdfPageFidelity,
 ) -> anyhow::Result<()> {
     fn collect_text(
         text: &mut String,
@@ -273,6 +294,16 @@ fn parse_page(
     let mut current_encoding = None;
     for operation in &content.operations {
         match operation.operator.as_ref() {
+            // Do can invoke arbitrarily nested Forms or raster content; this
+            // parser does not currently traverse them. Never call it Complete.
+            "Do" => fidelity.mark(PdfFidelityIssue::UnprocessedXObject),
+            // Tr=3 selects invisible rendering. It can be a valid OCR layer,
+            // so record it for review rather than silently deleting text.
+            "Tr" => {
+                if matches!(operation.operands.first(), Some(Object::Integer(3))) {
+                    fidelity.mark(PdfFidelityIssue::InvisibleTextRenderModeObserved);
+                }
+            }
             "Tm" => {
                 budget.elements(if elements.is_empty() { 2 } else { 1 })?;
                 let item = Text { text: std::mem::take(&mut text), size: 8 };
