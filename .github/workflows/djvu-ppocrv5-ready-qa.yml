@@ -1,0 +1,78 @@
+name: Shiva Cyrillic PP-OCRv5 pretrained model QA
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/djvu-ppocrv5-ready-qa.yml'
+      - 'scripts/ci/ppocrv5_cyrillic_lab.py'
+      - 'scripts/ci/test_ppocrv5_cyrillic_lab.py'
+      - 'scripts/ci/ready_ocr_lab.py'
+      - 'docs/research/djvu-cyrillic-ppocrv5-01.md'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/djvu-ppocrv5-ready-qa.yml'
+      - 'scripts/ci/ppocrv5_cyrillic_lab.py'
+      - 'scripts/ci/test_ppocrv5_cyrillic_lab.py'
+      - 'scripts/ci/ready_ocr_lab.py'
+      - 'docs/research/djvu-cyrillic-ppocrv5-01.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shiva-cyrillic-ppocrv5-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  onnx-vs-tesseract-synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install independent DjVu tools, native OCR, and offline-ready QA libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y djvulibre-bin tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng fonts-dejavu-core
+          python -m pip install --only-binary=:all: "pillow==11.3.0" "psutil==7.0.0" "djvu-rs==0.43.0"
+          python -m pip install --only-binary=:all: "rapidocr==3.9.2" "onnxruntime==1.23.2" "PyYAML==6.0.2"
+          python -m pip check
+          python -c 'import djvu_rs, rapidocr, onnxruntime; print("Ready-model runtimes imported")'
+      - name: Unit tests on offline security and quality contracts
+        shell: bash
+        run: python -m unittest -v scripts/ci/test_ppocrv5_cyrillic_lab.py
+      - name: Create four pages of authored synthetic Cyrillic in a DjVu
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/ready_ocr_lab.py --step generate --out "$RUNNER_TEMP/shiva-cyrillic-ppocrv5" --require-djvu-rs
+      - name: Explicit download and digest verification of immutable published OCR weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/ready_ocr_lab.py --step fetch-models --out "$RUNNER_TEMP/shiva-cyrillic-ppocrv5"
+          python scripts/ci/ppocrv5_cyrillic_lab.py --step fetch-models --out "$RUNNER_TEMP/shiva-cyrillic-ppocrv5"
+      - name: Run real ONNX detector + Cyrillic recognizer vs Tesseract on Rust-decoded DjVu
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/ci/ppocrv5_cyrillic_lab.py --step measure --out "$RUNNER_TEMP/shiva-cyrillic-ppocrv5"
+          cat "$RUNNER_TEMP/shiva-cyrillic-ppocrv5/ppocr_summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload text-only results, no original pages, OCR text or model binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiva-cyrillic-ppocrv5-text-only
+          path: |
+            ${{ runner.temp }}/shiva-cyrillic-ppocrv5/model_receipts.json
+            ${{ runner.temp }}/shiva-cyrillic-ppocrv5/ppocr_receipts.json
+            ${{ runner.temp }}/shiva-cyrillic-ppocrv5/ppocr_result.json
+            ${{ runner.temp }}/shiva-cyrillic-ppocrv5/ppocr_summary.md
+          if-no-files-found: warn
+          retention-days: 14
