@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 fn fixture(name: &str) -> Vec<u8> {
     assert!(matches!(name,
-        "form_nested.pdf" | "form_cycle.pdf" | "form_repeat.pdf" | "form_deep.pdf"));
+        "form_nested.pdf" | "form_cycle.pdf" | "form_repeat.pdf" |
+        "form_deep.pdf" | "form_font_fanout.pdf"));
     let root = PathBuf::from(
         std::env::var_os("SHIVA_QA_TEXT_OPERATORS_DIR")
             .expect("generated PDF QA directory is missing"),
@@ -83,5 +84,14 @@ fn nested_form_depth_ceiling_prevents_unbounded_recursion() -> anyhow::Result<()
     for depth in 4..6 {
         assert!(!actual.contains(&format!("DEPTH_{depth}")));
     }
+    Ok(())
+}
+
+#[test]
+fn repeated_form_font_decoding_has_a_separate_page_budget() -> anyhow::Result<()> {
+    let result = Transformer::parse_with_diagnostics(&Bytes::from(fixture("form_font_fanout.pdf")))?;
+    assert_eq!(result.status, PdfFidelityStatus::Partial);
+    assert!(result.pages[0].issues.contains(&PdfFidelityIssue::UnprocessedXObject));
+    assert_eq!(text(&result.document).matches("DOUBLE_FONTS").count(), 64);
     Ok(())
 }

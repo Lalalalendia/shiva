@@ -125,6 +125,19 @@ def deeply_nested_form():
 
 
 
+def font_fanout_form():
+    attrs = (b"/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 350 80] "
+             b"/Resources << /Font << /F1 4 0 R /F2 4 0 R >> >> ")
+    return package([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Double 5 0 R >> >> /Contents 6 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        stream(b"BT /F1 16 Tf 10 40 Td (DOUBLE_FONTS) Tj ET\n", attrs),
+        stream(b"/Double Do\n" * 100),
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True)
@@ -137,6 +150,7 @@ def main():
         ("form_cycle.pdf", cyclic_form),
         ("form_repeat.pdf", repeated_form),
         ("form_deep.pdf", deeply_nested_form),
+        ("form_font_fanout.pdf", font_fanout_form),
     ):
         data = create()
         (args.out / name).write_bytes(data)
@@ -144,7 +158,7 @@ def main():
             f"SHIVA_OPERATORS={name};bytes={len(data)};"
             f"sha256={hashlib.sha256(data).hexdigest()}"
         )
-    print("SHIVA_OPERATOR_GENERATOR=pass;source=stdlib;files=6")
+    print("SHIVA_OPERATOR_GENERATOR=pass;source=stdlib;files=7")
 
 
 if __name__ == "__main__":

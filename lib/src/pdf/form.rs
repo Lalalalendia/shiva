@@ -16,10 +16,12 @@ const MAX_FORM_DEPTH: usize = 4;
 const MAX_FORM_INVOCATIONS: usize = 128;
 const MAX_FORM_RESOURCES: usize = 128;
 const MAX_FORM_FONTS: usize = 64;
+const MAX_FORM_FONT_DECODES_PER_PAGE: usize = 128;
 
 #[derive(Default)]
 pub(super) struct FormBudget {
     invocations: usize,
+    font_decodes: usize,
 }
 
 fn resources_for_page<'a>(
@@ -198,6 +200,17 @@ fn visit<'a>(
     budget.page_content(bytes.len())?;
     let decoded = Content::decode(&bytes)?;
     budget.operations(decoded.operations.len())?;
+    // A small Form can be painted many times. Per-Form limits are not
+    // sufficient if font CMaps are decoded again on every invocation.
+    let font_count = pdf.get_dict_in_dict(form_resources, b"Font")
+        .map(|fonts| fonts.len()).unwrap_or(0);
+    let next = form_budget.font_decodes.saturating_add(font_count);
+    if next > MAX_FORM_FONT_DECODES_PER_PAGE {
+        fidelity.mark(PdfFidelityIssue::UnprocessedXObject);
+        active.pop();
+        return Ok(None);
+    }
+    form_budget.font_decodes = next;
     let fonts = decoded_fonts(pdf, form_resources)?;
     let mut current: Option<&Encoding<'_>> = None;
     let mut out = String::new();
