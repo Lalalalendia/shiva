@@ -1,0 +1,62 @@
+name: Shiva PDF text operators and Form XObject QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/tests/pdf_text_operator_gaps.rs'
+      - 'scripts/ci/generate-pdf-operators.py'
+      - '.github/workflows/pdf-text-operators.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/tests/pdf_text_operator_gaps.rs'
+      - 'scripts/ci/generate-pdf-operators.py'
+      - '.github/workflows/pdf-text-operators.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-pdf-operators:
+    name: Characterize quote and Form XObject fidelity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Provision Poppler for independent visible-text oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends poppler-utils
+          command -v pdftotext
+      - name: Generate two PDF inputs without third-party libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/generate-pdf-operators.py --out "$RUNNER_TEMP/shiva-pdf-operators"
+      - name: Confirm six painted strings and Form XObject text independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa="$RUNNER_TEMP/shiva-pdf-operators"
+          pdftotext -layout "$qa/text_operators.pdf" "$RUNNER_TEMP/operators.txt"
+          pdftotext -layout "$qa/form_xobject.pdf" "$RUNNER_TEMP/form.txt"
+          for marker in ALPHA_FIRST BETA_SECOND GAMMA_THIRD DELTA_QUOTE EPSILON_DOUBLE ZETA_TD; do
+            grep -Fq "$marker" "$RUNNER_TEMP/operators.txt"
+          done
+          grep -Fq 'PAGE_NATIVE_123' "$RUNNER_TEMP/form.txt"
+          grep -Fq 'FORM_INSIDE_451' "$RUNNER_TEMP/form.txt"
+          echo 'SHIVA_PDF_OPERATOR_VISUAL_ORACLE=pass;operators=6;form=2' >> "$GITHUB_STEP_SUMMARY"
+      - name: Characterize current known-incomplete Shiva parsing
+        shell: bash
+        env:
+          SHIVA_QA_TEXT_OPERATORS_DIR: ${{ runner.temp }}/shiva-pdf-operators
+        run: |
+          set -euo pipefail
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_text_operator_gaps -- --nocapture
