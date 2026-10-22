@@ -1,8 +1,7 @@
-//! SHIVA-PDF-06: characterize text-operator and Form XObject fidelity gaps.
+//! SHIVA-PDF-06: six repaired operators and bounded native Form text.
 //!
-//! The ordinary text operators must now preserve all six native strings.
-//! Form XObject text is still a documented incomplete extraction and must
-//! never be used as an unconditional Complete/worker admission proof.
+//! Form text still requires independent visual review. Nothing here enables
+//! PDF parsing in the production untrusted worker.
 #![cfg(feature = "qa-external-pdf")]
 
 use bytes::Bytes;
@@ -73,11 +72,11 @@ fn native_pdf_text_operators_preserve_all_six_painted_lines() -> anyhow::Result<
 }
 
 #[test]
-fn native_pdf_form_xobject_text_is_omitted() -> anyhow::Result<()> {
+fn native_pdf_form_xobject_text_is_extracted_once() -> anyhow::Result<()> {
     let text = extract(read_pdf("form_xobject.pdf"))?;
     assert_eq!(text.matches("PAGE_NATIVE_123").count(), 1);
-    assert!(!text.contains("FORM_INSIDE_451"),
-        "Form XObject unexpectedly parsed (update expectations)");
-    println!("SHIVA_PDF_KNOWN_GAP=form_xobject;visible_nested_text_missing=true");
+    assert_eq!(text.matches("FORM_INSIDE_451").count(), 1);
+    assert!(text.find("PAGE_NATIVE_123") < text.find("FORM_INSIDE_451"));
+    println!("SHIVA_PDF_FORM_REPAIR=pass;visible_text=2/2;verified_complete=false");
     Ok(())
 }
