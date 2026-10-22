@@ -39,7 +39,10 @@ fn document_embedded_path_does_not_get_read_or_indexed() {
         Err(ClientError::FailedExtraction)
     ));
 }
-#[cfg(any(all(target_os="linux",target_arch="x86_64"), windows))]
+#[cfg(all(
+    any(all(target_os="linux", target_arch="x86_64"), windows),
+    not(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))
+))]
 #[test]
 fn unsupported_pdf_is_not_launched() {
     let cfg = settings(worker_path());
@@ -173,4 +176,114 @@ fn nested_outer_job_allows_atomic_inner_worker_launch() {
         .expect("nested outer Job must not prevent contained Shiva extraction");
     assert!(verified.blocks.iter().any(|block| block.text.contains("世界")));
     eprintln!("SHIVA_WIN_NESTED_JOB_LIST=pass");
+}
+
+
+// QA-only: deterministic real PDF bytes, never a filesystem path/URL.
+// This intentionally exercises the strict host -> OS-contained child ->
+// framed result -> host's Complete-only transaction boundary.
+#[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+fn synthetic_pdf(lines: &[&str], with_graphics: bool) -> Vec<u8> {
+    use lopdf::content::{Content, Operation};
+    use lopdf::{dictionary, Document, Object, Stream, StringFormat};
+
+    let mut pdf = Document::with_version("1.5");
+    let pages_id = pdf.new_object_id();
+    let font_id = pdf.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+    });
+    let resources_id = pdf.add_object(dictionary! {
+        "Font" => dictionary! { "F1" => font_id },
+    });
+    let mut ops = vec![
+        Operation::new("BT", vec![]),
+        Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), 12.into()]),
+        Operation::new("Td", vec![30.into(), 720.into()]),
+    ];
+    for (i, text) in lines.iter().enumerate() {
+        if i > 0 {
+            ops.push(Operation::new("Td", vec![0.into(), (-16).into()]));
+        }
+        ops.push(Operation::new(
+            "Tj",
+            vec![Object::String(text.as_bytes().to_vec(), StringFormat::Literal)],
+        ));
+    }
+    ops.push(Operation::new("ET", vec![]));
+    if with_graphics {
+        // A real visible rectangle, not just suspicious PDF metadata.
+        ops.push(Operation::new("re", vec![10.into(), 10.into(), 50.into(), 50.into()]));
+        ops.push(Operation::new("f", vec![]));
+    }
+    let contents_id = pdf.add_object(Stream::new(
+        dictionary! {},
+        Content { operations: ops }.encode().expect("encode PDF QA operators"),
+    ));
+    let page_id = pdf.add_object(dictionary! {
+        "Type" => "Page",
+        "Parent" => pages_id,
+        "Resources" => resources_id,
+        "Contents" => contents_id,
+        "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+    });
+    pdf.objects.insert(pages_id, Object::Dictionary(dictionary! {
+        "Type" => "Pages",
+        "Count" => 1,
+        "Kids" => vec![page_id.into()],
+    }));
+    let catalog_id = pdf.add_object(dictionary! {
+        "Type" => "Catalog",
+        "Pages" => pages_id,
+    });
+    pdf.trailer.set("Root", catalog_id);
+    let mut output = Vec::new();
+    pdf.save_to(&mut output).expect("save QA-only PDF");
+    assert!(output.starts_with(b"%PDF-") && output.len() < 128_000);
+    output
+}
+
+#[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn real_confined_pdf_child_roundtrip_via_pinned_host_and_complete_only_commit() {
+    let pdf = synthetic_pdf(&["AQPDFALPHA", "AQPDFBETA"], false);
+    let authorized = settings(worker_path());
+    let verified = extract(&authorized, "authorized_pdf_lab_1", "pdf", &pdf)
+        .expect("QA-only isolated PDF must return a complete verified stream");
+    assert_eq!(verified.source.blake3_hex, blake3::hash(&pdf).to_hex().to_string());
+    assert_eq!(verified.source.input_bytes, pdf.len() as u64);
+    assert_eq!(verified.source.source_id, "authorized_pdf_lab_1");
+    let joined = verified.blocks.iter()
+        .map(|block| block.text.as_str()).collect::<Vec<_>>().join("");
+    let first = joined.find("AQPDFALPHA").expect("source marker A lost");
+    let second = joined.find("AQPDFBETA").expect("source marker B lost");
+    assert!(second > first, "source text order changed");
+    assert_eq!(joined.matches("AQPDFALPHA").count(), 1);
+    assert_eq!(joined.matches("AQPDFBETA").count(), 1);
+    eprintln!("SHIVA_PDF_WORKER_QA=pass;source_bound=true;markers=2;os_contained=true");
+}
+
+#[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn incomplete_or_corrupt_pdf_cannot_reach_verified_document() {
+    let cfg = settings(worker_path());
+    let blank = synthetic_pdf(&[], false);
+    assert!(matches!(
+        extract(&cfg, "blank_pdf_qa", "pdf", &blank),
+        Err(ClientError::FailedExtraction)
+    ), "a PDF with no extracted text cannot be Complete");
+    assert!(matches!(
+        extract(&cfg, "bad_pdf_qa", "pdf", b"%PDF-1.7\nbroken"),
+        Err(ClientError::FailedExtraction)
+    ), "a malformed PDF cannot reach the indexable result");
+    let with_graphics = synthetic_pdf(&["AQPDFALPHA"], true);
+    assert!(matches!(
+        extract(&cfg, "graphics_pdf_qa", "pdf", &with_graphics),
+        Err(ClientError::FailedExtraction)
+    ), "partial text plus vector drawing must not be reported Complete");
+    assert!(matches!(
+        extract(&cfg, "unsupported_docx_qa", "docx", b"PK\x03\x04"),
+        Err(ClientError::InvalidFormat)
+    ), "DOCX must remain disabled even in PDF QA mode");
 }

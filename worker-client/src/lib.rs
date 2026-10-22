@@ -111,7 +111,15 @@ fn check_settings(settings: &WorkerSettings, source_id: &str, format: &str, inpu
     if !valid_identifier(source_id) || input.len() > MAX_INPUT_BYTES {
         return Err(ClientError::InvalidSource);
     }
-    if !matches!(format, "txt" | "md" | "html") {
+    // The host's independent format gate must agree with the worker.
+    // Even a release build made with the QA feature is still PDF-denying.
+    let laboratory_pdf = cfg!(all(
+        feature = "qa-pdf-worker",
+        debug_assertions,
+        target_os = "linux",
+        target_arch = "x86_64"
+    )) && format == "pdf";
+    if !matches!(format, "txt" | "md" | "html") && !laboratory_pdf {
         return Err(ClientError::InvalidFormat);
     }
     if settings.timeout < Duration::from_millis(50)
@@ -272,6 +280,25 @@ mod tests {
             version: "0.1.0".into(),
         }
     }
+    #[test]
+    fn format_policy_requires_explicit_qa_build_on_linux() {
+        let settings = WorkerSettings {
+            executable: PathBuf::from("/not-executed"),
+            expected_binary_blake3: "a".repeat(64),
+            expected_version: "0.1.0".into(),
+            timeout: Duration::from_secs(2),
+        };
+        let allowed = check_settings(&settings, "qa_doc", "pdf", b"%PDF-1.4").is_ok();
+        assert_eq!(
+            allowed,
+            cfg!(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64")),
+        );
+        assert!(matches!(
+            check_settings(&settings, "qa_doc", "docx", b"docx"),
+            Err(ClientError::InvalidFormat)
+        ));
+    }
+
     #[test]
     fn empty_and_incomplete_stream_are_not_indexable() {
         assert!(matches!(

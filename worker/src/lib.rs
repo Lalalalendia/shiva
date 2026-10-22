@@ -64,6 +64,86 @@ fn parse_request<R: Read>(reader: &mut R) -> Result<(SourceRevision, Vec<u8>), &
     Ok((source, bytes))
 }
 
+fn worker_format_allowed(format: &str) -> bool {
+    matches!(format, "txt" | "md" | "html")
+        || (cfg!(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))
+            && format == "pdf")
+}
+
+// A laboratory PDF "Complete" is restricted to one uncomplicated,
+// text-only page. If a PDF draws graphics, loads XObjects, uses forms or
+// presents unknown operators, fail rather than indexing a partial view.
+// This is not a general-purpose PDF-completeness proof or a release gate.
+#[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+fn qa_pdf_text_only_gate(bytes: &[u8]) -> Result<(), &'static str> {
+    use lopdf::{content::Content, Document as PdfDocument, LoadOptions};
+    const MAX_QA_STREAM: usize = 2 * 1024 * 1024;
+    let pdf = PdfDocument::load_mem_with_options(
+        bytes, LoadOptions::with_max_decompressed_size(MAX_QA_STREAM)
+    ).map_err(|_| "PDF QA structural preflight failed")?;
+    let pages = pdf.get_pages();
+    if pages.len() != 1 {
+        return Err("PDF QA supports exactly one text-only page");
+    }
+    let page_id = *pages.values().next().ok_or("PDF QA page missing")?;
+    let page = pdf.get_dictionary(page_id).map_err(|_| "PDF QA page invalid")?;
+    for key in [b"Annots".as_slice(), b"AA".as_slice(), b"Metadata".as_slice()] {
+        if page.get(key).is_ok() {
+            return Err("PDF QA forbids annotations and page extras");
+        }
+    }
+    let catalog = pdf.catalog().map_err(|_| "PDF QA catalog invalid")?;
+    for key in [
+        b"AcroForm".as_slice(), b"Names".as_slice(),
+        b"OpenAction".as_slice(), b"AA".as_slice(),
+        b"OCProperties".as_slice(),
+    ] {
+        if catalog.get(key).is_ok() {
+            return Err("PDF QA forbids embedded actions or attachments");
+        }
+    }
+    let forbidden_resources = |resources: &lopdf::Dictionary| {
+        [b"XObject".as_slice(), b"Pattern".as_slice(),
+         b"Shading".as_slice(), b"ExtGState".as_slice(),
+         b"Properties".as_slice()]
+            .iter().any(|name| resources.get(name).is_ok())
+    };
+    let (inline, inherited) = pdf.get_page_resources(page_id)
+        .map_err(|_| "PDF QA resources invalid")?;
+    if inline.is_some_and(forbidden_resources) {
+        return Err("PDF QA contains non-text resources");
+    }
+    for resource_id in inherited {
+        let resource = pdf.get_dictionary(resource_id)
+            .map_err(|_| "PDF QA inherited resources invalid")?;
+        if forbidden_resources(resource) {
+            return Err("PDF QA contains non-text inherited resources");
+        }
+    }
+    let content = pdf.get_page_content_with_limit(page_id, MAX_QA_STREAM)
+        .map_err(|_| "PDF QA page content budget exceeded")?;
+    let operations = Content::decode(&content)
+        .map_err(|_| "PDF QA content operators invalid")?.operations;
+    if operations.len() > 8192 {
+        return Err("PDF QA operation count exceeded");
+    }
+    let mut text_shows = 0usize;
+    for operation in &operations {
+        match operation.operator.as_str() {
+            "BT" | "ET" | "Tf" | "Td" | "TD" | "Tm" | "T*"
+            | "Tc" | "Tw" | "Tz" | "TL" | "Ts" => {}
+            "Tj" | "TJ" => text_shows += 1,
+            // All graphics, embedded objects, invisible text modes and
+            // unsupported extensions are intentionally rejected.
+            _ => return Err("PDF QA contains unverified drawing operators"),
+        }
+    }
+    if text_shows == 0 {
+        return Err("PDF QA has no text-show operators");
+    }
+    Ok(())
+}
+
 fn parse_document(format: &str, content: &[u8]) -> Result<Document, &'static str> {
     let source = Bytes::copy_from_slice(content);
     // No filesystem loader, network fetch, font resolution or user paths.
@@ -78,6 +158,14 @@ fn parse_document(format: &str, content: &[u8]) -> Result<Document, &'static str
             .map_err(|_| "markdown parser rejected input or external asset"),
         "html" => shiva::html::Transformer::parse_with_loader(&source, deny_asset)
             .map_err(|_| "HTML parser rejected input or external asset"),
+        // Laboratory only: the production/release worker never compiles
+        // an enabled PDF dispatcher, even with this feature selected.
+        #[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+        "pdf" => {
+            qa_pdf_text_only_gate(content)?;
+            shiva::pdf::Transformer::parse(&source)
+                .map_err(|_| "PDF parser rejected input")
+        },
         _ => Err("unsupported document format"),
     }
 }
@@ -185,7 +273,7 @@ fn failed<W: Write>(writer: &mut W, source: &SourceRevision, code: WarningCode, 
 /// caller-selected file descriptors are accepted as request fields.
 pub fn run<R: Read, W: Write>(mut input: R, mut output: W) -> Result<(), &'static str> {
     let (source, bytes) = parse_request(&mut input)?;
-    if !matches!(source.format.as_str(), "txt" | "md" | "html") {
+    if !worker_format_allowed(&source.format) {
         return failed(&mut output, &source, WarningCode::Unsupported, "Format disabled by worker policy");
     }
     let document = match std::panic::catch_unwind(|| parse_document(&source.format, &bytes)) {
@@ -307,10 +395,30 @@ mod tests {
         assert_eq!(frames.len(), 1, "must never emit a successful batch on error");
     }
 
+    #[cfg(not(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64")))]
     #[test]
     fn unsupported_pdf_fails_closed() {
         let frames = verify(b"%PDF-1.7", "pdf");
         assert!(matches!(frames.last().unwrap().message, Message::End { outcome: Outcome::Failed, .. }));
+    }
+
+    #[test]
+    fn policy_never_enables_docx_or_archives() {
+        assert!(!worker_format_allowed("docx"));
+        assert!(!worker_format_allowed("zip"));
+        assert!(!worker_format_allowed("PDF"));
+        assert_eq!(
+            worker_format_allowed("pdf"),
+            cfg!(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64")),
+        );
+    }
+
+    #[cfg(all(feature = "qa-pdf-worker", debug_assertions, target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn corrupt_pdf_fails_without_indexable_blocks() {
+        let frames = verify(b"%PDF-1.7\nnot a valid PDF", "pdf");
+        assert_eq!(frames.len(), 1);
+        assert!(matches!(frames[0].message, Message::End { outcome: Outcome::Failed, .. }));
     }
 
     #[test]
