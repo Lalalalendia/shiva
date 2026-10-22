@@ -103,9 +103,13 @@ def classify(lines: list[OcrLine], page_width: int) -> dict:
     max_gap = anchor_h * 3.2
     # Partition into vertical components based on a line's full extent, not its
     # first pixel. This lets short legitimate final lines join their paragraph.
+    # Never let a vertically stretched false-positive box bridge the
+    # illustration and actual prose. Exclude it from connectivity itself.
+    admissible = [i for i, line in enumerate(lines) if line.height <= anchor_h * 2.5]
     components: list[list[int]] = []
     bottom = -1
-    for i, line in enumerate(lines):
+    for i in admissible:
+        line = lines[i]
         if not components or line.y - bottom > max_gap:
             components.append([])
         components[-1].append(i)
@@ -116,7 +120,7 @@ def classify(lines: list[OcrLine], page_width: int) -> dict:
         group_anchor_count = sum(i in anchor_set for i in group)
         if group_anchor_count >= 2:
             bodies.extend(group)
-    body = sorted({i for i in bodies if lines[i].height <= anchor_h * 2.5})
+    body = sorted(set(bodies))
     body_set = set(body)
     review = [i for i in range(len(lines)) if i not in body_set]
     if not body:
