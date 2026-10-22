@@ -15,6 +15,7 @@ pub struct Transformer;
 
 // Explicitly provisional native extraction; no implicit Complete verdict.
 mod fidelity;
+mod form;
 pub use fidelity::{PdfExtractionReport, PdfFidelityIssue, PdfFidelityStatus, PdfPageFidelity};
 
 
@@ -303,11 +304,23 @@ fn parse_page(
     budget.operations(content.operations.len())?;
 
     let mut current_encoding = None;
+    let mut form_budget = form::FormBudget::default();
     for operation in &content.operations {
         match operation.operator.as_ref() {
-            // Do can invoke arbitrarily nested Forms or raster content; this
-            // parser does not currently traverse them. Never call it Complete.
-            "Do" => fidelity.mark(PdfFidelityIssue::UnprocessedXObject),
+            "Do" => {
+                anyhow::ensure!(operation.operands.len() == 1,
+                    "PDF Do expects exactly one resource name");
+                let name = operation.operands[0].as_name()?;
+                if let Some(form_text) = form::from_page(
+                    pdf_document, page_id, name, &mut form_budget, budget, fidelity,
+                )? {
+                    if !form_text.is_empty() {
+                        line_boundary(&mut text, budget)?;
+                        // The recursive extraction charged each decoded byte.
+                        text.push_str(&form_text);
+                    }
+                }
+            },
             // Tr=3 selects invisible rendering. It can be a valid OCR layer,
             // so record it for review rather than silently deleting text.
             "Tr" => {
