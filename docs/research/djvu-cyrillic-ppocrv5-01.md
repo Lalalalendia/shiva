@@ -24,6 +24,14 @@ All model weights are published under Apache-2.0. SHA pins were taken from [djvu
 
 This is the *mixed PP-OCRv4 detector + PP-OCRv5 Cyrillic recognizer* pipeline, not a claim about the official full PP-OCRv5 end-to-end bundle.
 
+
+## Layout-result gate (observed in exact CI before postprocessing)
+
+The real pinned ONNX pipeline PASSed in CI #39790155300; all 4 samples recognized. Raw two-column page OCR has **CER 0.600, WER 0.756757**, while Tesseract fast/best have CER/WER 0 on that page. Because the recognizer returned 10 lines with total output text length equal to authored text length (285 characters), a large part may be ordering rather than missing characters. The four-page raw PP-OCR mean CER was 0.159259 / WER 0.226689; Tesseract fast 0.007408 / 0.01875, best 0.000926 / 0.0125. RapidOCR cold init 0.4333s, PP warmed per-page median 1.1706s and Python process peak RSS 250.3MB; compare memory/timings cautiously (different measurement boundaries).
+
+A new QA-only, **no-training** attempt uses a conservative two-column geometric sort on RapidOCR returned line boxes: split on a large gap in left edges (>=25% page width), at least two text blocks in each column, and overlap in vertical spans; order each column from top to bottom and put left before right. Preserve original order for one column and malformed geometry. Always report *both raw and reordered* CER/WER. This is not assumed successful until the new exact-head workflow passes. A real page with mixed headings, images, or 3+ columns needs further validation and cannot be auto-marked Complete.
+
+
 ## Acceptance
 
 - [ ] Pinned models loaded from exact byte hashes; no implicit downloads.
