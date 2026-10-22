@@ -255,7 +255,7 @@ def check_djvu(root: Path, pages: list[dict], *, require: bool, decoded: Path) -
         idx = p["page"] - 1
         with tempfile.TemporaryDirectory(prefix="djvu-ocr-compare-") as tmp:
             reference = Path(tmp) / "reference.pnm"
-            run(["ddjvu", f"-page={idx+1}", "-format=pnm", "-dpi=300", str(book), str(reference)])
+            run(["ddjvu", f"-page={idx+1}", "-format=pnm", "-scale=100", str(book), str(reference)])
             t0 = time.perf_counter()
             image = doc.page(idx).render(dpi=300).to_pil().convert("L")
             elapsed = round(time.perf_counter() - t0, 4)
