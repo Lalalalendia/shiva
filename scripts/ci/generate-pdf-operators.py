@@ -67,19 +67,84 @@ def form():
     ])
 
 
+
+def nested_form():
+    return package([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Outer 5 0 R >> >> /Contents 7 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        stream(b"BT /F1 16 Tf 10 42 Td (OUTER_NESTED) Tj ET\n/Inner Do\n",
+               b"/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 350 100] /Resources << /Font << /F1 4 0 R >> /XObject << /Inner 6 0 R >> >> "),
+        stream(b"BT /F1 16 Tf 5 17 Td (INNER_NESTED) Tj ET\n",
+               b"/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 350 100] /Resources << /Font << /F1 4 0 R >> >> "),
+        stream(b"BT /F1 16 Tf 72 700 Td (PAGE_NESTED) Tj ET\nq 1 0 0 1 72 540 cm /Outer Do Q\n"),
+    ])
+
+
+def cyclic_form():
+    return package([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Cycle 5 0 R >> >> /Contents 6 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        stream(b"BT /F1 16 Tf 10 40 Td (CYCLE_SAFE) Tj ET\n/Loop Do\n",
+               b"/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 350 80] /Resources << /Font << /F1 4 0 R >> /XObject << /Loop 5 0 R >> >> "),
+        stream(b"/Cycle Do\n"),
+    ])
+
+
+def repeated_form():
+    return package([
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /Repeat 5 0 R >> >> /Contents 6 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        stream(b"BT /F1 16 Tf 10 40 Td (REPEAT_SAFE) Tj ET\n",
+               b"/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 350 80] /Resources << /Font << /F1 4 0 R >> >> "),
+        stream(b"/Repeat Do\n" * 150),
+    ])
+
+
+def deeply_nested_form():
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> /XObject << /First 5 0 R >> >> /Contents 11 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for depth in range(6):
+        refs = (b" /XObject << /Next " + str(6 + depth).encode() + b" 0 R >>") if depth < 5 else b""
+        attrs = (b"/Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 350 80] "
+                 b"/Resources << /Font << /F1 4 0 R >>" + refs + b" >> ")
+        content = b"BT /F1 16 Tf 10 40 Td (DEPTH_" + str(depth).encode() + b") Tj ET\n"
+        objects.append(stream(content + (b"/Next Do\n" if depth < 5 else b""), attrs))
+    objects.append(stream(b"/First Do\n"))
+    assert len(objects) == 11
+    return package(objects)
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     args.out.mkdir(parents=True, mode=0o700, exist_ok=False)
-    for name, create in (("text_operators.pdf", operators), ("form_xobject.pdf", form)):
+    for name, create in (
+        ("text_operators.pdf", operators),
+        ("form_xobject.pdf", form),
+        ("form_nested.pdf", nested_form),
+        ("form_cycle.pdf", cyclic_form),
+        ("form_repeat.pdf", repeated_form),
+        ("form_deep.pdf", deeply_nested_form),
+    ):
         data = create()
         (args.out / name).write_bytes(data)
         print(
             f"SHIVA_OPERATORS={name};bytes={len(data)};"
             f"sha256={hashlib.sha256(data).hexdigest()}"
         )
-    print("SHIVA_OPERATOR_GENERATOR=pass;source=stdlib;files=2")
+    print("SHIVA_OPERATOR_GENERATOR=pass;source=stdlib;files=6")
 
 
 if __name__ == "__main__":
