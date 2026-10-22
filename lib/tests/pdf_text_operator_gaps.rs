@@ -1,8 +1,8 @@
 //! SHIVA-PDF-06: characterize text-operator and Form XObject fidelity gaps.
 //!
-//! These are expected **known-incomplete** outcomes of real Shiva parsing.
-//! A green test records the defect; it must never authorize a Complete index
-//! or imply production support for the untrusted PDF worker.
+//! The ordinary text operators must now preserve all six native strings.
+//! Form XObject text is still a documented incomplete extraction and must
+//! never be used as an unconditional Complete/worker admission proof.
 #![cfg(feature = "qa-external-pdf")]
 
 use bytes::Bytes;
@@ -53,21 +53,22 @@ fn extract(raw: Vec<u8>) -> anyhow::Result<String> {
 }
 
 #[test]
-fn native_pdf_text_operators_have_known_missing_quote_strings() -> anyhow::Result<()> {
+fn native_pdf_text_operators_preserve_all_six_painted_lines() -> anyhow::Result<()> {
     let text = extract(read_pdf("text_operators.pdf"))?;
-    for marker in ["ALPHA_FIRST", "BETA_SECOND", "GAMMA_THIRD", "ZETA_TD"] {
-        assert_eq!(text.matches(marker).count(), 1, "expected Tj text missing");
-    }
-    for marker in ["DELTA_QUOTE", "EPSILON_DOUBLE"] {
-        assert!(!text.contains(marker), "quote operators unexpectedly supported");
-    }
-    assert!(text.contains("ALPHA_FIRSTBETA_SECOND"),
-        "Td did not demonstrate the missing visual line separator");
-    println!(
-        "SHIVA_PDF_KNOWN_GAP=text_operators;quote_strings_missing=true;line_breaks_missing=true"
+    let lines: Vec<_> = text.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "ALPHA_FIRST",
+            "BETA_SECOND",
+            "GAMMA_THIRD",
+            "DELTA_QUOTE",
+            "EPSILON_DOUBLE",
+            "ZETA_TD",
+        ],
+        "Shiva must preserve all six native painted text lines in order"
     );
-    // Updating the parser must change this characterization test into
-    // assertions of full text fidelity; green here is not a release gate.
+    println!("SHIVA_PDF_OPERATOR_REPAIR=pass;painted_text=6/6;order=true");
     Ok(())
 }
 
