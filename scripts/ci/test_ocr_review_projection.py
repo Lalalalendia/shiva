@@ -66,6 +66,19 @@ class OcrReviewContract(unittest.TestCase):
         fake2=dict(result,status='complete')
         with self.assertRaises(AssertionError):metrics(src,fake2)
 
+    def test_tall_false_word_cannot_bridge_diagram_into_paragraph(self):
+        figure = line(400, ['A1'], width=80, height=40)
+        bridge = line(500, ['X'], width=80, height=1160)
+        glyph = line(1200, ['B2'], width=80, height=40)
+        first = line(1510, ['Очень', 'важный', 'настоящий', 'книжный', 'текст'])
+        second = line(1590, ['Другая', 'широкая', 'полезная', 'строка', 'абзаца'])
+        src = [figure, bridge, glyph, first, second]
+        result = classify(src,1700)
+        self.assertEqual(result['body'],[3,4])
+        self.assertEqual(result['review'],[0,1,2])
+        self.assertEqual(result['status'],'partial')
+        self.assertEqual(metrics(src,result)['search_words'],10)
+
     def test_empty_page_is_needs_review_not_false_complete(self):
         result=classify([],1700)
         self.assertEqual(result['status'],'needs_review')

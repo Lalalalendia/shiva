@@ -23,12 +23,12 @@ Generate one 1700×2300 page (300 DPI) with a 19×19 Go grid, circles, diagram c
 
 Local direct-PNG preliminary result (before running the CI DjVu codec leg): **98 recognized words** total; 37 authored-paragraph words kept, 61 diagram-region words held for review; **0** figure-region words indexed. Raw CER against authored prose (including figure labels) **86.03%**, projected CER **0**; this drastic change is **specific to this deliberately artificial test** and must not be marketed as a real-book OCR accuracy claim. Status `Partial`.
 
-Seven offline negative/positive unit tests cover source partition integrity, high-confidence figure labels, isolated short text, connected short paragraph endings, malformed TSV, empty page, and no false `Complete`.
+Eight offline negative/positive unit tests cover source partition integrity, high-confidence figure labels, isolated short text, connected short paragraph endings, malformed TSV, empty page, and no false `Complete`.
 
 ## Acceptance and release blockers
 
 - [ ] Exact-HEAD Linux GitHub Actions PASS with a *real synthetic DjVu encoded independently* and decoded by `djvu-rs`, plus Tesseract TSV and ground-truth metrics.
-- [ ] 7/7 offline unit tests PASS; source text/image never leaves runner.
+- [ ] 8/8 offline unit tests PASS; source text/image never leaves runner.
 - [ ] Keep `Partial` on synthetic page with review region; never claim `Complete` from raw OCR without a proofread oracle.
 - [ ] Do **not** connect QA projection to shipping index. Current worker-client rejects `Partial`; production would need an explicit safe staging/review policy with rechecked user permissions.
 - [ ] Production DjVu blocked: current trusted worker accepts only 2 MiB (private book 5.58 MB), seccomp/LPAC worker needs separately accepted byte/CPU/RSS/model-handling changes, and Akula needs File Gate immutable snapshot, per-page locators and revocation-safe index updates.
