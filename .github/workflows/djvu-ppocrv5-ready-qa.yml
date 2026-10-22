@@ -44,6 +44,24 @@ jobs:
           python -m pip install --only-binary=:all: "rapidocr==3.9.2" "onnxruntime==1.23.2" "PyYAML==6.0.2"
           python -m pip check
           python -c 'import djvu_rs, rapidocr, onnxruntime; print("Ready-model runtimes imported")'
+      - name: Obtain public CPython 3.13 wheel for a LOCAL-ONLY real-book check
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/shiva-public-djvu-rs-wheel"
+          mkdir -p "$dest"
+          python -m pip download --only-binary=:all: --no-deps \
+            --python-version 3.13 --implementation cp --abi cp313 \
+            --platform manylinux2014_x86_64 \
+            -d "$dest" "djvu-rs==0.43.0"
+          sha256sum "$dest"/*.whl > "$dest/SHA256SUMS"
+      - name: Upload published decoder wheel only (NO book, pages or OCR text)
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiva-public-djvu-rs-cp313-wheel
+          path: ${{ runner.temp }}/shiva-public-djvu-rs-wheel/
+          if-no-files-found: error
+          retention-days: 7
       - name: Unit tests on offline security and quality contracts
         shell: bash
         run: python -m unittest -v scripts/ci/test_ppocrv5_cyrillic_lab.py
