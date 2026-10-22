@@ -135,7 +135,7 @@ def font_fanout_form():
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
         stream(b"BT /F1 16 Tf 10 40 Td (DOUBLE_FONTS) Tj ET\n", attrs),
         stream(b"/Double Do\n" * 100),
-    ]
+    ])
 
 
 def main():
