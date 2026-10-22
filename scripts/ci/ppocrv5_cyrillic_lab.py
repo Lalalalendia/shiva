@@ -97,6 +97,7 @@ def engine(root: Path):
     # imports. Explicit local model paths prevent automatic model downloads.
     models = model_paths(root)
     from rapidocr import RapidOCR
+    from rapidocr.utils.typings import EngineType, OCRVersion, ModelType, LangRec
     params = {
         "Global.use_det": True,
         "Global.use_cls": False,
@@ -107,16 +108,16 @@ def engine(root: Path):
         "Global.log_level": "warning",
         "EngineConfig.onnxruntime.intra_op_num_threads": 1,
         "EngineConfig.onnxruntime.inter_op_num_threads": 1,
-        "Det.engine_type": "onnxruntime",
-        "Det.ocr_version": "PP-OCRv4",
-        "Det.model_type": "mobile",
+        "Det.engine_type": EngineType.ONNXRUNTIME,
+        "Det.ocr_version": OCRVersion.PPOCRV4,
+        "Det.model_type": ModelType.MOBILE,
         "Det.model_path": str(models["det"]),
         "Det.limit_side_len": 2000,
         "Det.limit_type": "max",
-        "Rec.engine_type": "onnxruntime",
-        "Rec.ocr_version": "PP-OCRv5",
-        "Rec.model_type": "mobile",
-        "Rec.lang_type": "cyrillic",
+        "Rec.engine_type": EngineType.ONNXRUNTIME,
+        "Rec.ocr_version": OCRVersion.PPOCRV5,
+        "Rec.model_type": ModelType.MOBILE,
+        "Rec.lang_type": LangRec.CYRILLIC,
         "Rec.model_path": str(models["rec"]),
         "Rec.rec_keys_path": str(models["keys"]),
         "Rec.rec_batch_num": 6,
