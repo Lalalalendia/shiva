@@ -1,0 +1,57 @@
+name: Shiva PDF visual truth diagnostic QA
+
+on:
+  pull_request:
+    paths:
+      - 'lib/tests/pdf_visual_truth.rs'
+      - 'scripts/ci/generate-pdf-visual-truth.py'
+      - '.github/workflows/pdf-visual-truth.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'lib/tests/pdf_visual_truth.rs'
+      - 'scripts/ci/generate-pdf-visual-truth.py'
+      - '.github/workflows/pdf-visual-truth.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual-truth-linux:
+    name: Five real Shiva PDF fidelity probes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate five QA-only PDFs with Python stdlib
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/generate-pdf-visual-truth.py --out "$RUNNER_TEMP/shiva-pdf-visual-truth"
+      - name: Independently prove identical render but contradictory Unicode
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v pdftoppm
+          command -v pdftotext
+          qa="$RUNNER_TEMP/shiva-pdf-visual-truth"
+          pdftoppm -f 1 -singlefile -r 120 -gray -png "$qa/healthy.pdf" "$RUNNER_TEMP/healthy"
+          pdftoppm -f 1 -singlefile -r 120 -gray -png "$qa/broken.pdf" "$RUNNER_TEMP/broken"
+          cmp "$RUNNER_TEMP/healthy.png" "$RUNNER_TEMP/broken.png"
+          pdftotext "$qa/healthy.pdf" "$RUNNER_TEMP/healthy.txt"
+          pdftotext "$qa/broken.pdf" "$RUNNER_TEMP/broken.txt"
+          grep -Fqx 'HELLO SHIVA' "$RUNNER_TEMP/healthy.txt"
+          grep -Fqx 'XELLO ZXIVA' "$RUNNER_TEMP/broken.txt"
+          echo 'SHIVA_VISUAL_METAMORPHIC=pass;pixel_identical=true;unicode_drift=true' >> "$GITHUB_STEP_SUMMARY"
+      - name: Reproduce all five fidelity outcomes in Shiva's PDF parser
+        shell: bash
+        env:
+          SHIVA_QA_VISUAL_TRUTH_DIR: ${{ runner.temp }}/shiva-pdf-visual-truth
+        run: |
+          set -euo pipefail
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_visual_truth -- --nocapture
