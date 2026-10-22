@@ -81,13 +81,13 @@ fn skipped_raster_content_is_partial_even_with_native_text() -> anyhow::Result<(
 }
 
 #[test]
-fn form_xobject_is_partial_not_a_complete_text_extraction() -> anyhow::Result<()> {
+fn bounded_form_text_remains_unverified_not_complete() -> anyhow::Result<()> {
     let report = extract(OPERATORS, "form_xobject.pdf")?;
-    assert_eq!(report.status, PdfFidelityStatus::Partial);
+    assert_eq!(report.status, PdfFidelityStatus::NeedsReview);
     assert_eq!(report.pages.len(), 1);
-    assert!(report.pages[0].issues.contains(&PdfFidelityIssue::UnprocessedXObject));
+    assert_eq!(report.pages[0].issues, vec![PdfFidelityIssue::VisualFidelityUnverified]);
     assert!(text(&report.document).contains("PAGE_NATIVE_123"));
-    assert!(!text(&report.document).contains("FORM_INSIDE_451"));
+    assert!(text(&report.document).contains("FORM_INSIDE_451"));
     Ok(())
 }
 

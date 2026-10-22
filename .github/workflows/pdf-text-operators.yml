@@ -4,12 +4,16 @@ on:
   pull_request:
     paths:
       - 'lib/tests/pdf_text_operator_gaps.rs'
+      - 'lib/tests/pdf_form_xobject.rs'
+      - 'lib/src/pdf/form.rs'
       - 'scripts/ci/generate-pdf-operators.py'
       - '.github/workflows/pdf-text-operators.yml'
   push:
     branches: [main]
     paths:
       - 'lib/tests/pdf_text_operator_gaps.rs'
+      - 'lib/tests/pdf_form_xobject.rs'
+      - 'lib/src/pdf/form.rs'
       - 'scripts/ci/generate-pdf-operators.py'
       - '.github/workflows/pdf-text-operators.yml'
   workflow_dispatch:
@@ -35,7 +39,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends poppler-utils
           command -v pdftotext
-      - name: Generate two PDF inputs without third-party libraries
+      - name: Generate six PDF profiles without third-party libraries
         shell: bash
         run: |
           set -euo pipefail
@@ -52,11 +56,16 @@ jobs:
           done
           grep -Fq 'PAGE_NATIVE_123' "$RUNNER_TEMP/form.txt"
           grep -Fq 'FORM_INSIDE_451' "$RUNNER_TEMP/form.txt"
-          echo 'SHIVA_PDF_OPERATOR_VISUAL_ORACLE=pass;operators=6;form=2' >> "$GITHUB_STEP_SUMMARY"
-      - name: Characterize current known-incomplete Shiva parsing
+          pdftotext -layout "$qa/form_nested.pdf" "$RUNNER_TEMP/nested.txt"
+          for marker in PAGE_NESTED OUTER_NESTED INNER_NESTED; do
+            grep -Fq "$marker" "$RUNNER_TEMP/nested.txt"
+          done
+          echo 'SHIVA_PDF_OPERATOR_VISUAL_ORACLE=pass;operators=6;form=2;nested=3' >> "$GITHUB_STEP_SUMMARY"
+      - name: Prove repaired operators and bounded Form recursion
         shell: bash
         env:
           SHIVA_QA_TEXT_OPERATORS_DIR: ${{ runner.temp }}/shiva-pdf-operators
         run: |
           set -euo pipefail
           cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_text_operator_gaps -- --nocapture
+          cargo test -p shiva --no-default-features --features qa-external-pdf,markdown,html,xml --test pdf_form_xobject -- --nocapture
