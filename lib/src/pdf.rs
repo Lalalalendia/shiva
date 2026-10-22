@@ -17,6 +17,7 @@ pub struct Transformer;
 mod fidelity;
 pub use fidelity::{PdfExtractionReport, PdfFidelityIssue, PdfFidelityStatus, PdfPageFidelity};
 
+
 // Standalone library QA limits, not permission to enable PDF in the worker.
 // Per-stream and page limits are supplemented below with cumulative page,
 // text, operation and element limits. Process CPU, actual RSS and all PDF
@@ -267,6 +268,16 @@ fn parse_page(
         Ok(())
     }
 
+    // PDF line movement operators are explicit boundaries in the painted
+    // text sequence. Keep the byte/text budget on every emitted separator.
+    fn line_boundary(text: &mut String, budget: &mut PdfBudget) -> anyhow::Result<()> {
+        if !text.is_empty() && !text.ends_with('\n') {
+            budget.text(1)?;
+            text.push('\n');
+        }
+        Ok(())
+    }
+
     let mut text = String::new();
     let fonts = pdf_document.get_page_fonts(page_id)?;
     anyhow::ensure!(fonts.len() <= 64, "PDF per-page font count budget exceeded");
@@ -325,6 +336,56 @@ fn parse_page(
                 let encoding = current_encoding
                     .ok_or_else(|| anyhow::anyhow!("PDF text without a usable font"))?;
                 collect_text(&mut text, encoding, &operation.operands, budget, 0)?;
+            }
+            "Td" | "TD" => {
+                // Moving vertically starts a new visible line. A purely
+                // horizontal offset cannot establish a safe word boundary
+                // without font metrics, so do not infer one here.
+                anyhow::ensure!(
+                    operation.operands.len() == 2
+                        && operation.operands.iter().all(|value|
+                            matches!(value, Object::Integer(_) | Object::Real(_))),
+                    "PDF Td/TD expects two numeric text-position operands"
+                );
+                let vertical_move = match &operation.operands[1] {
+                    Object::Integer(value) => *value != 0,
+                    Object::Real(value) => *value != 0.0,
+                    _ => unreachable!("validated numeric text position"),
+                };
+                if vertical_move {
+                    line_boundary(&mut text, budget)?;
+                }
+            }
+            "T*" => {
+                anyhow::ensure!(operation.operands.is_empty(), "PDF T* takes no operands");
+                line_boundary(&mut text, budget)?;
+            }
+            "'" | "\"" => {
+                // PDF quote prints a string after moving to the next text
+                // line. Double quote additionally sets character/word
+                // spacing; those numbers are not text glyphs.
+                let expected = if operation.operator == "'" { 1 } else { 3 };
+                anyhow::ensure!(
+                    operation.operands.len() == expected,
+                    "PDF quote text operator has incorrect operand count"
+                );
+                if expected == 3 {
+                    anyhow::ensure!(
+                        operation.operands[..2].iter().all(|value|
+                            matches!(value, Object::Integer(_) | Object::Real(_))),
+                        "PDF double quote text spacing operands must be numeric"
+                    );
+                }
+                let operand = operation.operands.last()
+                    .ok_or(ParserError::Common)?;
+                anyhow::ensure!(
+                    matches!(operand, Object::String(_, _)),
+                    "PDF quote requires a text string operand"
+                );
+                let encoding = current_encoding
+                    .ok_or_else(|| anyhow::anyhow!("PDF quoted text without a usable font"))?;
+                line_boundary(&mut text, budget)?;
+                collect_text(&mut text, encoding, std::slice::from_ref(operand), budget, 0)?;
             }
             "ET" => {
                 if !text.ends_with('\n') {
