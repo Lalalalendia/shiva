@@ -35,6 +35,12 @@ jobs:
           test -s Cargo.lock
           sha256sum Cargo.lock
           echo 'SHIVA_LOCK_SNAPSHOT_REAL_GENERATED_PASS'
+      - name: Emit only public Cargo.lock bytes in bounded base64 log segments
+        run: |
+          set -euo pipefail
+          echo SHIVA_LOCK_TRANSFER_BEGIN
+          base64 -w0 Cargo.lock | fold -w 2000 | awk '{printf("SHIVA_LOCK_CHUNK_%05d:%s\\n", NR, $0)}'
+          echo SHIVA_LOCK_TRANSFER_END
       - name: Save generated Cargo.lock as disposable review-only artifact
         uses: actions/upload-artifact@v4
         with:
