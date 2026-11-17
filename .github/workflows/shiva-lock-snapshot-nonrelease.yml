@@ -1,0 +1,44 @@
+name: Shiva CLI dependency lock snapshot (review-only)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/shiva-lock-snapshot-nonrelease.yml'
+      - 'Cargo.toml'
+      - 'cli/Cargo.toml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  source-lock:
+    name: Generate real Cargo.lock snapshot from exact PR source (no release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Resolve exact workspace dependencies without running build scripts
+        run: |
+          set -euo pipefail
+          test ! -e Cargo.lock
+          cargo generate-lockfile --manifest-path Cargo.toml
+          cargo metadata --locked --format-version 1 --no-deps --manifest-path Cargo.toml >/dev/null
+          test -s Cargo.lock
+          sha256sum Cargo.lock
+          echo 'SHIVA_LOCK_SNAPSHOT_REAL_GENERATED_PASS'
+      - name: Save generated Cargo.lock as disposable review-only artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shiva-cli-generated-lock-NOT-RELEASE
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
